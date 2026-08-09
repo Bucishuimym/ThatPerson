@@ -1,5 +1,5 @@
 /**
- * ThatGirl 单次命令入口（第二版提示词 · 一：与 npm run chat 共存，不破坏原有功能）
+ * ThatPerson 单次命令入口（第二版提示词 · 一：与 npm run chat 共存，不破坏原有功能）
  * 用法：npm run dev <问题> | npm run mock <问题>
  */
 import { chat, loadEnv, sectionOf, today } from './chat';
@@ -20,8 +20,8 @@ async function main(): Promise<void> {
   const present = loadPresent();
 
   const profileCount = Object.values(memories.profile).filter((s) => s.trim()).length;
-  console.log(`[ThatGirl] 记忆已加载：画像 ${profileCount}/3 · 重要日期 ${memories.importantDates ? '有' : '无'} · 最近会话 ${memories.recentSessions.length} 天`);
-  if (isMock) console.log('[ThatGirl] 离线模式（--mock），不会调用 API');
+  console.log(`[ThatPerson] 记忆已加载：画像 ${profileCount}/3 · 重要日期 ${memories.importantDates ? '有' : '无'} · 最近会话 ${memories.recentSessions.length} 天`);
+  if (isMock) console.log('[ThatPerson] 离线模式（--mock），不会调用 API');
 
   console.log(`提问：${prompt}`);
   console.log('---');
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
   }
   store.appendSessionLog(buildSessionSummary(today(), prompt, reply, archives));
 
-  console.log(`[ThatGirl] 已归档 ${archives.length} 条记忆，今日摘要已写入 history/session_logs/`);
+  console.log(`[ThatPerson] 已归档 ${archives.length} 条记忆，今日摘要已写入 history/session_logs/`);
 }
 
 main().catch((err) => {

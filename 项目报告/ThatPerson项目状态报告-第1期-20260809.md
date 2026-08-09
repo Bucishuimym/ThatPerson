@@ -1,6 +1,6 @@
 # 项目状态报告
 
-> 项目名称：ThatGirl
+> 项目名称：ThatPerson
 > 报告期次：第 1 期
 > 报告日期：2026-08-09
 > 编制人: BUCISHUI
@@ -77,7 +77,7 @@
 
 ---
 > 状态标签：`#报告/周报` `#报告/里程碑`
-> 项目标签：`#项目/Agent` `#项目/ThatGirl`
+> 项目标签：`#项目/Agent` `#项目/ThatPerson`
 
 ## 📎 本次迭代交付物
 
@@ -90,8 +90,8 @@
 
 ## 📎 参考资源
 
-- `ThatGirl项目资源文件/Agent 项目.md`
-- `ThatGirl项目资源文件/Agent开发团队职业规划.md`
-- `ThatGirl项目资源文件/关于ThatGirl-Agent项目第一版提示词.md`
-- `ThatGirl项目资源文件/单身经济行业分析报告-20260808.md`
-- `ThatGirl项目资源文件/项目报告提交模板.md`
+- `ThatPerson项目资源文件/Agent 项目.md`
+- `ThatPerson项目资源文件/Agent开发团队职业规划.md`
+- `ThatPerson项目资源文件/关于ThatPerson-Agent项目第一版提示词.md`
+- `ThatPerson项目资源文件/单身经济行业分析报告-20260808.md`
+- `ThatPerson项目资源文件/项目报告提交模板.md`

@@ -1,4 +1,4 @@
-﻿import fs from 'node:fs';
+import fs from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -6,11 +6,11 @@ import path from 'node:path';
  * 用法：node dist/src/report.js
  * 行为：读取 项目资源文件/项目报告提交模板.md 的结构，
  *       扫描资源文档与本次迭代实际产物，自动检测期次并生成
- *       项目报告/ThatGirl项目状态报告-第N期-YYYYMMDD.md
+ *       项目报告/ThatPerson项目状态报告-第N期-YYYYMMDD.md
  */
 
 const ROOT = process.cwd();
-const RESOURCE_DIR = path.join(ROOT, 'ThatGirl项目资源文件');
+const RESOURCE_DIR = path.join(ROOT, 'ThatPerson项目资源文件');
 const REPORT_DIR = path.join(ROOT, '项目报告');
 const TEMPLATE_PATH = path.join(RESOURCE_DIR, '项目报告提交模板.md');
 
@@ -25,7 +25,7 @@ function nextPeriod(): number {
   let max = 0;
   if (fs.existsSync(REPORT_DIR)) {
     for (const name of fs.readdirSync(REPORT_DIR)) {
-      const m = name.match(/ThatGirl项目状态报告-第(\d+)期/);
+      const m = name.match(/ThatPerson项目状态报告-第(\d+)期/);
       if (m) max = Math.max(max, Number(m[1]));
     }
   }
@@ -51,7 +51,7 @@ function buildReport(period: number): string {
 
   return `# 项目状态报告
 
-> 项目名称：ThatGirl
+> 项目名称：ThatPerson
 > 报告期次：第 ${period} 期
 > 报告日期：${date}
 > 编制人: BUCISHUI
@@ -128,7 +128,7 @@ function buildReport(period: number): string {
 
 ---
 > 状态标签：\`#报告/周报\` \`#报告/里程碑\`
-> 项目标签：\`#项目/Agent\` \`#项目/ThatGirl\`
+> 项目标签：\`#项目/Agent\` \`#项目/ThatPerson\`
 
 ## 📎 本次迭代交付物
 
@@ -136,7 +136,7 @@ ${deliverables.map((f) => `- \`${f}\``).join('\n') || '- 无'}
 
 ## 📎 参考资源
 
-${resourceFiles.map((f) => `- \`ThatGirl项目资源文件/${f}\``).join('\n') || '- 无'}
+${resourceFiles.map((f) => `- \`ThatPerson项目资源文件/${f}\``).join('\n') || '- 无'}
 `;
 }
 
@@ -147,7 +147,7 @@ function main(): void {
   }
   fs.mkdirSync(REPORT_DIR, { recursive: true });
   const period = nextPeriod();
-  const file = path.join(REPORT_DIR, `ThatGirl项目状态报告-第${period}期-${today().replace(/-/g, '')}.md`);
+  const file = path.join(REPORT_DIR, `ThatPerson项目状态报告-第${period}期-${today().replace(/-/g, '')}.md`);
   fs.writeFileSync(file, buildReport(period), 'utf8');
   console.log(`已生成：${file}`);
 }

@@ -23,8 +23,8 @@ async function main(): Promise<void> {
   const present = loadPresent();
 
   const rl = readline.createInterface({ input: stdin, output: stdout });
-  console.log('[ThatGirl] 持续对话模式已开启' + (isMock ? '（离线演示，不调用 API）' : ''));
-  console.log('[ThatGirl] 输入 exit / quit / 退出 / 再见 结束对话\n');
+  console.log('[ThatPerson] 持续对话模式已开启' + (isMock ? '（离线演示，不调用 API）' : ''));
+  console.log('[ThatPerson] 输入 exit / quit / 退出 / 再见 结束对话\n');
 
   let history: ChatMessage[] = [];
   let summary = '';
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     const memories = await store.load();
     try {
       const reply = await chat(line, memories, { presentText: present, history, summary, isMock });
-      console.log(`ThatGirl：${reply}\n`);
+      console.log(`ThatPerson：${reply}\n`);
 
       history.push({ role: 'user', content: line }, { role: 'assistant', content: reply });
       // 分层摘要：超出窗口时，把最早一轮折叠进摘要
@@ -56,14 +56,14 @@ async function main(): Promise<void> {
         store.appendArchive(sectionOf(entry), entry);
       }
       store.appendSessionLog(buildSessionSummary(today(), line, reply, archives));
-      if (archives.length) console.log(`[ThatGirl] 已归档 ${archives.length} 条记忆\n`);
+      if (archives.length) console.log(`[ThatPerson] 已归档 ${archives.length} 条记忆\n`);
     } catch (err) {
-      console.error(`[ThatGirl] 出错：${err instanceof Error ? err.message : err}\n`);
+      console.error(`[ThatPerson] 出错：${err instanceof Error ? err.message : err}\n`);
     }
   }
 
   rl.close();
-  console.log('[ThatGirl] 已退出，期待下次聊天～');
+  console.log('[ThatPerson] 已退出，期待下次聊天～');
 }
 
 main().catch((err) => {

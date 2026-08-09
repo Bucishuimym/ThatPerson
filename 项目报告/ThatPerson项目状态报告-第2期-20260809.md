@@ -1,6 +1,6 @@
 # 项目状态报告
 
-> 项目名称：ThatGirl
+> 项目名称：ThatPerson
 > 报告期次：第 2 期
 > 报告日期：2026-08-09
 > 编制人：技术主管（Agent Team 系统工程组）
@@ -76,7 +76,7 @@
 
 ---
 > 状态标签：`#报告/周报` `#报告/里程碑`
-> 项目标签：`#项目/Agent` `#项目/ThatGirl`
+> 项目标签：`#项目/Agent` `#项目/ThatPerson`
 
 ## 📎 本次迭代交付物
 
@@ -86,6 +86,6 @@
 
 ## 📎 参考资源
 
-- `ThatGirl项目资源文件/关于ThatGirl-Agent项目第二版提示词.md`
-- `ThatGirl项目资源文件/Agent 上下文工程.md`
-- `ThatGirl项目资源文件/AI Agent 记忆机制.md`
+- `ThatPerson项目资源文件/关于ThatPerson-Agent项目第二版提示词.md`
+- `ThatPerson项目资源文件/Agent 上下文工程.md`
+- `ThatPerson项目资源文件/AI Agent 记忆机制.md`

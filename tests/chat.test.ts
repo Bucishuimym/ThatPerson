@@ -16,7 +16,7 @@ const base: LoadedMemories = {
 test('Present：能加载 present/ 预设元认知', () => {
   const present = loadPresent();
   assert.ok(present.length > 0, '应读取到 present 预设内容');
-  assert.ok(present.includes('ThatGirl'), '应包含身份声明');
+  assert.ok(present.includes('ThatPerson'), '应包含身份声明');
 });
 
 test('System：Present 拼接在 System 消息最前', () => {

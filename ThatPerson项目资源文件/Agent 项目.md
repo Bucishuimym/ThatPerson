@@ -2,7 +2,7 @@
 
 > 创建：2026-08-06
 > 状态：#状态/进行中
-> 代码位置：`G:\XXFS\Pycharm\ThatGirl\Agent.py`
+> 代码位置：`G:\XXFS\Pycharm\ThatPerson\Agent.py`
 
 ## 项目目标
 

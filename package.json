@@ -1,7 +1,7 @@
 {
-  "name": "ThatGirl",
+  "name": "ThatPerson",
   "version": "1.0.0",
-  "description": "ThatGirl - 无限接近人的个人 AI 伴侣（API=大脑 / skill=手 / Markdown=记忆）",
+  "description": "ThatPerson - 无限接近人的个人 AI 伴侣（API=大脑 / skill=手 / Markdown=记忆）",
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc",
