@@ -1,0 +1,30 @@
+# 密钥文件（含明文 API Key，绝不提交）
+.env
+API-key.txt
+API-key.md
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 依赖与构建产物
+node_modules/
+
+# 虚拟环境
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 密钥文件通配防护
+*.key
+*key*.md
+
+# 智能体 / 本地工具配置（不提交）
+.claude/
+.codex/
+.agents/
