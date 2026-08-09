@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "ThatGirl",
   "version": "1.0.0",
   "description": "ThatGirl - 无限接近人的个人 AI 伴侣（API=大脑 / skill=手 / Markdown=记忆）",
@@ -8,6 +8,8 @@
     "dev": "tsc && node --env-file=.env dist/src/index.js",
     "start": "node --env-file=.env dist/src/index.js",
     "mock": "tsc && node dist/src/index.js --mock",
+    "chat": "tsc && node dist/src/cli.js",
+    "chat:mock": "tsc && node dist/src/cli.js --mock",
     "test": "tsc && node --test \"dist/tests/*.test.js\"",
     "report": "tsc && node dist/src/report.js"
   },
