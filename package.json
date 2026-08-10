@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "ThatPerson - 无限接近人的个人 AI 伴侣（API=大脑 / skill=手 / Markdown=记忆）",
   "main": "dist/src/index.js",
+  "bin": {
+    "thatperson": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc && node --env-file=.env dist/src/index.js",

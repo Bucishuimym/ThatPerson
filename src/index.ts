@@ -1,5 +1,5 @@
 /**
- * ThatPerson 单次命令入口（第二版提示词 · 一：与 npm run chat 共存，不破坏原有功能）
+ * ThatPerson 单次命令入口（第三版提示词 · 一：与 npm run chat 共存）
  * 用法：npm run dev <问题> | npm run mock <问题>
  */
 import { chat, loadEnv, sectionOf, today } from './chat';

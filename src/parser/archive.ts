@@ -1,14 +1,13 @@
 /**
- * 记忆归档提取模块（离线规则版）
+ * 记忆归档提取模块（离线规则版）· 第 3 期修复
  *
- * 依据《关于ThatPerson-Agent项目第一版提示词》v3.0 第 4.2 / 4.3 节实现：
- * - extractArchives：基于规则启发式从本轮对话中提取偏好/经历/日期/身份/模式，绝不调用任何 API。
- * - buildSessionSummary：生成每日对话摘要（主题、情绪基调、新增记忆、待跟进事项）。
+ * 修复点（对应《ThatPerson记忆上下文失控分析与改进方案》3c）：
+ * - 经历改用「动宾短语」提取：不再被语气词「去啊」劫持，「今天去打篮球」归档为「打篮球」。
+ * - 负向偏好回溯过滤场景词：对象为「燕麦拿铁」而非「咖啡馆」。
+ * - 补全感受词表：松弛/治愈/解压/痛快/上头/舒畅/尽兴/安心/踏实/过瘾 等。
+ * - 假模式消除：单条消息不再产出「模式」；改为跨 ≥2 轮/天的 `detectCrossTurnPatterns`。
  *
- * 设计说明（数据工程师视角）：
- * - 全部为正则 + 关键词启发式，可离线运行，不消耗 API Key。
- * - 置信度遵循契约：高=明确陈述，中=多次推断，低=单次暗示。
- * - dialog 一律截取用户原话片段，保留关键词上下文。
+ * 仍为离线规则版，不调用任何 API，不消耗 Key。
  */
 
 import type {
@@ -29,32 +28,44 @@ const TOPIC_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
   ['奶茶', '奶茶'],
   ['茶', '茶饮'],
   ['运动', '运动'],
-  ['健身', '健身'],
-  ['瑜伽', '瑜伽'],
-  ['跑步', '跑步'],
+  ['健身', '运动'],
+  ['瑜伽', '运动'],
+  ['跑步', '运动'],
+  ['篮球', '运动'],
+  ['羽毛球', '运动'],
+  ['游泳', '运动'],
+  ['爬山', '运动'],
+  ['骑行', '运动'],
   ['看书', '阅读'],
   ['读书', '阅读'],
   ['电影', '电影'],
   ['追剧', '追剧'],
+  ['游戏', '游戏'],
+  ['唱歌', '音乐'],
+  ['听歌', '音乐'],
+  ['音乐', '音乐'],
   ['工作', '工作'],
   ['上班', '工作'],
-  ['公司', '公司'],
-  ['周末', '周末安排'],
+  ['加班', '工作'],
+  ['上课', '学习'],
+  ['考试', '考试'],
+  ['面试', '求职'],
+  ['毕业', '毕业'],
+  ['搬家', '搬家'],
   ['旅行', '旅行'],
   ['旅游', '旅行'],
   ['猫', '宠物'],
   ['狗', '宠物'],
   ['做饭', '做饭'],
   ['美食', '美食'],
-  ['考试', '考试'],
-  ['面试', '求职'],
-  ['毕业', '毕业'],
-  ['搬家', '搬家'],
   ['生日', '生日'],
   ['纪念日', '纪念日'],
   ['熬夜', '作息'],
   ['睡觉', '作息'],
 ];
+
+/** 场景词：负向偏好回溯时需过滤的地点/行为场景（3c） */
+const SCENE_WORDS = /咖啡馆|咖啡店|店里|楼下|附近|那边|餐厅|商场|超市|书店|健身房|办公室|公司|学校|家里|外面|路上/;
 
 // ===== 基础工具 =====
 
@@ -101,6 +112,7 @@ function splitClauses(text: string): string[] {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
+
 /** 统计主题关键词出现次数 */
 function countTopicOccurrences(text: string): Map<string, number> {
   const counts = new Map<string, number>();
@@ -149,13 +161,13 @@ function makeTags(text: string, type: ArchiveType): string[] {
   if (/(吃|喝|咖啡|拿铁|奶茶|茶|菜|饭|火锅|甜点|美食)/.test(text)) {
     push('#饮食偏好');
   }
-  if (/(运动|健身|瑜伽|跑步|锻炼)/.test(text)) {
+  if (/(运动|健身|瑜伽|跑步|锻炼|篮球|羽毛球|游泳|爬山|骑行)/.test(text)) {
     push('#运动偏好');
   }
-  if (/(周末|看书|读书|电影|追剧|旅行|旅游)/.test(text)) {
+  if (/(周末|看书|读书|电影|追剧|旅行|旅游|游戏|音乐|唱歌|听歌)/.test(text)) {
     push('#生活方式');
   }
-  if (/(工作|上班|公司|同事|老板)/.test(text)) {
+  if (/(工作|上班|加班|公司|同事|老板)/.test(text)) {
     push('#职业');
   }
   if (tags.length === 0) {
@@ -210,7 +222,7 @@ const PREF_RULES: PrefRule[] = [
   { re: /(?:我)?(?:每天|经常|总是|习惯性|每天早上|每晚)([^，。！？!?；;、\n]{0,16})/g, polarity: 'pos', confidence: '中' },
 ];
 
-/** 负向偏好缺少对象时，向前回溯最近分隔符前的名词短语（如「不太喜欢」→「燕麦拿铁」） */
+/** 负向偏好缺少对象时，向前回溯最近分隔符前的名词短语（3c：过滤场景词，对象=燕麦拿铁≠咖啡馆） */
 function backtrackObject(text: string, matchIndex: number): string {
   const before = text.slice(0, matchIndex);
   const lastSep = Math.max(
@@ -221,12 +233,18 @@ function backtrackObject(text: string, matchIndex: number): string {
     before.lastIndexOf('；'),
     before.lastIndexOf('\n'),
   );
-  const chunk = (lastSep === -1 ? before : before.slice(0, lastSep)).trim();
-  const cleaned = chunk
-    .replace(/^(?:我|今天|昨天|前天|去|去了|试了|试过|喝了|吃过|看了|还是|真的|有点|有些|就是|比较|楼下)+/, '')
+  let chunk = (lastSep === -1 ? before : before.slice(0, lastSep)).trim();
+  chunk = chunk
+    .replace(/^(?:我|今天|昨天|前天|周末|去|去了|试了|试过|喝了|吃过|看了|还是|真的|有点|有些|就是|比较|顺便|顺便去)+/, '')
     .trim();
-  return cleaned.slice(-10);
+  // 场景词只留其后的部分（「咖啡馆试了燕麦拿铁」→「试了燕麦拿铁」）
+  const parts = chunk.split(SCENE_WORDS);
+  chunk = parts[parts.length - 1].trim();
+  chunk = chunk.replace(/^(?:试了|试过|喝了|吃过|看了|买了|尝了|尝试|吃了|点了|叫了|来了|去了)+/, '').trim();
+  chunk = chunk.replace(/[的了呢啊吧都就是]+$/, '').trim();
+  return chunk.slice(-12);
 }
+
 /** 从用户文本提取偏好条目 */
 function extractPrefs(userText: string): PrefHit[] {
   const hits: PrefHit[] = [];
@@ -268,6 +286,7 @@ function extractPrefs(userText: string): PrefHit[] {
   }
   return hits;
 }
+
 /** 判断两个偏好对象是否同主题 */
 function sameTopic(a: string, b: string): boolean {
   if (!a || !b) return false;
@@ -292,30 +311,62 @@ function detectConflicts(prefs: PrefHit[]): void {
   }
 }
 
-// ===== 经历提取 =====
+// ===== 经历提取（3c：动宾短语） =====
 
-const ACTION_HINTS = /今天|昨天|前天|上周|周末|最近|刚|刚刚|去(?:了|过|了趟)?|试(?:了|过)?|做(?:了|过)?|参加(?:了|过)?|毕业|入职|搬家|看(?:了|过|了场|了部)?|吃(?:了|过)?|喝(?:了|过)?|玩(?:了|过)?/;
-const STRONG_FEEL = /(开心|高兴|兴奋|舒服|放松|满意|享受|上瘾|推荐|值得|太棒|好棒|很棒|超棒|超喜欢|好喜欢|很喜欢|喜欢|有趣|有意思|幸福|满足|惊喜|好看|好吃|好玩|好用)/;
-const FEEL_WORDS = /(开心|高兴|兴奋|舒服|放松|满意|享受|上瘾|推荐|值得|太棒|好棒|很棒|超棒|超喜欢|好喜欢|很喜欢|喜欢|有趣|有意思|幸福|满足|惊喜|好看|好吃|好玩|好用|累|紧张|难过|难受|烦|委屈|失望|遗憾|辛苦|还行|一般|不错|挺好|很好|有点|感觉|体验|新奇|新鲜|奇怪)/;
+/** 单字动词（语气词「去啊」不在此列；「去」仅在与宾语相连时视为动作） */
+const SINGLE_VERBS = '打看玩吃喝听踢游泳学买做上读写逛跑爬骑唱练试办';
+/** 多字动词（优先匹配） */
+const MULTI_VERBS = /(?:参加|体验|练习|毕业|入职|搬家|开始|准备|学会|尝试|坚持|错过|完成|看完|看完|吃过|喝过|去过|试过|走过|路过|出差|开会|约了|点了)/;
 
-/** 从用户文本提取经历条目（行为动词 + 感受词） */
+const STRONG_FEEL =
+  /(开心|高兴|兴奋|舒服|放松|松弛|治愈|解压|痛快|上头|舒畅|尽兴|安心|踏实|过瘾|满意|享受|上瘾|推荐|值得|太棒|好棒|很棒|超棒|超喜欢|好喜欢|很喜欢|喜欢|有趣|有意思|幸福|满足|惊喜|好看|好吃|好玩|好用|爽)/;
+const FEEL_WORDS =
+  /(开心|高兴|兴奋|舒服|放松|松弛|治愈|解压|痛快|上头|舒畅|尽兴|安心|踏实|过瘾|满意|享受|上瘾|推荐|值得|太棒|好棒|很棒|超棒|超喜欢|好喜欢|很喜欢|喜欢|有趣|有意思|幸福|满足|惊喜|好看|好吃|好玩|好用|爽|累|紧张|难过|难受|烦|委屈|失望|遗憾|辛苦|还行|一般|不错|挺好|很好|有点|感觉|体验|新奇|新鲜|奇怪)/;
+
+/** 从「感受词之前的文本」中提取离感受词最近的动宾短语 */
+function extractVerbPhrase(beforeFeel: string): string {
+  const candidates: Array<{ index: number; verb: string }> = [];
+  let m: RegExpExecArray | null;
+  const multiRe = new RegExp(MULTI_VERBS.source, 'g');
+  while ((m = multiRe.exec(beforeFeel)) !== null) {
+    candidates.push({ index: m.index, verb: m[0] });
+    multiRe.lastIndex = m.index + Math.max(m[0].length, 1);
+  }
+  for (let i = 0; i < SINGLE_VERBS.length; i += 1) {
+    const verb = SINGLE_VERBS[i];
+    let pos = beforeFeel.indexOf(verb);
+    while (pos !== -1) {
+      candidates.push({ index: pos, verb });
+      pos = beforeFeel.indexOf(verb, pos + 1);
+    }
+  }
+  if (candidates.length === 0) return '';
+  // 取最后一个动词（离感受词最近）
+  candidates.sort((a, b) => b.index - a.index);
+  const hit = candidates[0];
+  // 从动词到最近的逗号/句号前（在 beforeFeel 内）
+  let tail = beforeFeel.slice(hit.index);
+  const sepIdx = tail.search(/[，,；;。]/);
+  if (sepIdx !== -1) tail = tail.slice(0, sepIdx);
+  let phrase = tail.trim();
+  // 清洗：去掉尾部的「了/过/一下/了一会儿」与句末语气
+  phrase = phrase.replace(/(?:了|过|一下|了一会儿|了一会儿|了一下|了会儿)+$/, '');
+  phrase = phrase.replace(/[的了呢啊吧]+$/, '');
+  // 动词「去/试/上」等单独出现时保留（如「去健身」）
+  return phrase.length >= 2 ? phrase : '';
+}
+
+/** 从用户文本提取经历条目（行为动词 + 感受词，3c 动宾短语版） */
 function extractExperiences(userText: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
   for (const sentence of splitSentences(userText)) {
-    const trigger = sentence.match(ACTION_HINTS);
-    if (!trigger) continue;
     const feel = sentence.match(FEEL_WORDS);
     if (!feel) continue;
-    const act = trigger[0];
-    const actIndex = sentence.indexOf(act);
-    const actionPart = sentence
-      .slice(actIndex)
-      .split(/[，,]/)[0]
-      .trim()
-      .slice(0, 30);
-    if (actionPart.length < 2) continue;
-    let feelWord = feel[0];
     const feelIndex = feel.index ?? 0;
+    const beforeFeel = sentence.slice(0, feelIndex);
+    const actionPart = extractVerbPhrase(beforeFeel);
+    if (!actionPart) continue;
+    let feelWord = feel[0];
     if (/[不没]/.test(sentence.slice(Math.max(0, feelIndex - 2), feelIndex))) {
       feelWord = '不' + feelWord.replace(/^不/, '');
     }
@@ -362,6 +413,7 @@ function extractDates(userText: string): ArchiveEntry[] {
   }
   return entries;
 }
+
 // ===== 身份提取 =====
 
 interface IdentityRule {
@@ -376,7 +428,7 @@ const IDENTITY_RULES: IdentityRule[] = [
   { re: /我是([^，。！？!?；;、\n]{1,12})/g, describe: (m) => '用户身份：' + m[1] + '。' },
   { re: /我工作([^，。！？!?；;、\n]{1,14})/g, describe: (m) => '用户工作情况：' + m[1] + '。' },
   { re: /我住在([^，。！？!?；;、\n]{1,12})/g, describe: (m) => '用户住在' + m[1] + '。' },
-  { re: /我在([^，。！？!?；;、\n]{1,12})/g, describe: (m) => '用户所在地：' + m[1] + '。' },
+  { re: /我在([^，。！！?;；\n]{1,12})/g, describe: (m) => '用户所在地：' + m[1] + '。' },
 ];
 
 /** 从用户文本提取身份条目 */
@@ -401,25 +453,41 @@ function extractIdentities(userText: string): ArchiveEntry[] {
   return entries;
 }
 
-// ===== 模式提取 =====
+// ===== 模式提取（3c：仅跨 ≥2 轮/天，单条消息不产出） =====
 
-/** 同主题出现 >= 2 次时提取为「模式」 */
-function extractPatterns(userText: string): ArchiveEntry[] {
-  const counts = countTopicOccurrences(userText);
-  const repeated: Array<[string, number]> = [];
-  counts.forEach((n, topic) => {
-    if (n >= 2) repeated.push([topic, n]);
-  });
-  repeated.sort((a, b) => b[1] - a[1]);
+/**
+ * 跨轮模式检测：仅当某主题在 ≥2 条不同消息（跨轮/跨天）中出现时才记为「模式」。
+ * 单条消息内多次提及（如 BC-4 的三次咖啡）不会产出模式条目。
+ */
+export function detectCrossTurnPatterns(userTexts: string[]): ArchiveEntry[] {
+  const totalCounts = new Map<string, number>();
+  const turnCounts = new Map<string, number>();
+  for (const text of userTexts) {
+    if (!text || !text.trim()) continue;
+    const seenInTurn = new Set<string>();
+    const counts = countTopicOccurrences(text);
+    counts.forEach((n, topic) => {
+      totalCounts.set(topic, (totalCounts.get(topic) || 0) + n);
+      if (!seenInTurn.has(topic)) {
+        seenInTurn.add(topic);
+        turnCounts.set(topic, (turnCounts.get(topic) || 0) + 1);
+      }
+    });
+  }
   const entries: ArchiveEntry[] = [];
-  for (const [topic, n] of repeated.slice(0, 2)) {
-    const idx = firstTopicIndex(userText, topic);
+  const ranked: Array<[string, number]> = [];
+  turnCounts.forEach((turns, topic) => {
+    if (turns >= 2 && (totalCounts.get(topic) || 0) >= 2) ranked.push([topic, turns]);
+  });
+  ranked.sort((a, b) => b[1] - a[1]);
+  for (const [topic] of ranked.slice(0, 2)) {
+    const idx = firstTopicIndex(userTexts.join('\n'), topic);
     if (idx === -1) continue;
-    const dialog = dialogSnippet(userText, idx, 24);
+    const dialog = dialogSnippet(userTexts.join('\n'), idx, 24);
     entries.push({
       type: '模式',
       dialog,
-      insight: '用户本次对话多次提及「' + topic + '」（共 ' + n + ' 次），形成稳定的兴趣或行为模式。',
+      insight: '用户近几轮多次提及「' + topic + '」（跨 ' + turnCounts.get(topic) + ' 轮），形成稳定的兴趣或行为模式。',
       confidence: '中',
       tags: ['#' + topic, '#模式'],
     });
@@ -431,7 +499,7 @@ function extractPatterns(userText: string): ArchiveEntry[] {
 
 /**
  * 从本轮对话提取归档条目（离线规则版，不调用任何 API）。
- * assistantText 保留契约签名，当前规则仅以用户原话为准。
+ * 单条消息不产出「模式」；跨轮模式请调用 detectCrossTurnPatterns。
  */
 export function extractArchives(userText: string, assistantText: string): ArchiveEntry[] {
   const text = (userText || '').trim();
@@ -443,7 +511,6 @@ export function extractArchives(userText: string, assistantText: string): Archiv
   entries.push(...extractExperiences(text));
   entries.push(...extractDates(text));
   entries.push(...extractIdentities(text));
-  entries.push(...extractPatterns(text));
   return dedupe(entries);
 }
 
@@ -453,7 +520,7 @@ const MOOD_RULES: ReadonlyArray<readonly [RegExp, string]> = [
   [/(焦虑|担心|紧张|害怕|压力(?:大|好大)|不安|失眠|慌了)/, '焦虑'],
   [/(难过|低落|伤心|不开心|沮丧|emo|委屈|烦(?:死|透)?|好累|累死|疲惫|丧|失落|孤单|孤独)/, '低落'],
   [/(开心|高兴|兴奋|太棒|好棒|超开心|好开心|开心死|兴奋死|哈哈|嘻嘻|超喜欢|太喜欢)/, '兴奋'],
-  [/(舒服|放松|惬意|安逸|轻松|自在|舒坦)/, '轻松'],
+  [/(舒服|放松|惬意|安逸|轻松|自在|舒坦|松弛|治愈|解压|痛快|尽兴)/, '轻松'],
 ];
 
 /** 情绪基调映射：焦虑 > 低落 > 兴奋 > 轻松 > 平静 */
@@ -514,7 +581,6 @@ function extractFollowUps(userText: string): string[] {
 /**
  * 生成每日对话摘要（提示词 4.3）。
  * newMemories 格式：类型 | 内容 | 置信度。
- * assistantText 保留契约签名，当前情绪基调仅以用户原话为准。
  */
 export function buildSessionSummary(
   date: string,

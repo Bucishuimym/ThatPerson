@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,7 +7,7 @@ import { createMemoryStore } from '../src/memory/store';
 import type { ArchiveEntry, SessionSummary } from '../src/memory/types';
 
 function makeTmpRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'thatgirl-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-test-'));
 }
 
 test('ensureStructure 创建五类记忆目录且不建空文件', () => {
