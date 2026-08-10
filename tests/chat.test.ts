@@ -1,8 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { buildSystemPrompt, retrieveRelevant } from '../src/chat';
 import { loadPresent } from '../src/present';
 import type { LoadedMemories } from '../src/memory/types';
+import { isolateHome } from './helpers';
+
+const iso = isolateHome();
+test.after(() => iso.restore());
 
 const base: LoadedMemories = {
   profile: {
@@ -13,8 +20,17 @@ const base: LoadedMemories = {
   recentSessions: [],
 };
 
-test('Present：能加载 present/ 预设元认知', () => {
-  const present = loadPresent();
+function makePresentProject(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-chat-'));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'ThatPerson' }), 'utf8');
+  fs.mkdirSync(path.join(root, 'present'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'present', 'identity.md'), '# 我是 ThatPerson 测试人格\n', 'utf8');
+  return root;
+}
+
+test('Present：能加载隔离项目 present/ 预设元认知（不依赖真实项目文件）', () => {
+  const root = makePresentProject();
+  const present = loadPresent(root);
   assert.ok(present.length > 0, '应读取到 present 预设内容');
   assert.ok(present.includes('ThatPerson'), '应包含身份声明');
 });

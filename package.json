@@ -7,14 +7,14 @@
     "thatperson": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc && node --env-file=.env dist/src/index.js",
-    "start": "node --env-file=.env dist/src/index.js",
-    "mock": "tsc && node dist/src/index.js --mock",
-    "chat": "tsc && node dist/src/cli.js",
-    "chat:mock": "tsc && node dist/src/cli.js --mock",
-    "test": "tsc && node --test \"dist/tests/*.test.js\"",
-    "report": "tsc && node dist/src/report.js"
+  "build": "tsc -p tsconfig.build.json",
+  "dev": "tsc -p tsconfig.build.json && node --env-file=.env dist/src/index.js",
+  "start": "node --env-file=.env dist/src/index.js",
+  "mock": "tsc -p tsconfig.build.json && node dist/src/index.js --mock",
+  "chat": "tsc -p tsconfig.build.json && node dist/src/cli.js",
+  "chat:mock": "tsc -p tsconfig.build.json && node dist/src/cli.js --mock",
+    "test": "tsc --noEmit && tsc -p tsconfig.test.json && node --test \"dist-test/tests/*.test.js\"",
+  "report": "tsc -p tsconfig.build.json && node dist/src/report.js"
   },
   "dependencies": {},
   "devDependencies": {

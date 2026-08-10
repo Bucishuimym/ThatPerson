@@ -7,6 +7,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isProjectMode, memoryRoot, resolveHistoryDir } from '../src/config';
+import { isolateHome } from './helpers';
+
+const iso = isolateHome();
+test.after(() => iso.restore());
 
 function makeTmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-cfg-'));
@@ -42,6 +46,7 @@ test('memoryRoot：项目模式用 cwd，全局模式用 THATPERSON_HOME', () =>
   const proj = makeTmpRoot();
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ name: 'ThatPerson' }), 'utf8');
   const home = makeTmpRoot();
+  const savedHome = process.env.THATPERSON_HOME;
   process.env.THATPERSON_HOME = home;
   try {
     assert.equal(memoryRoot(proj), proj, '项目模式记忆根应为项目目录');
@@ -49,6 +54,7 @@ test('memoryRoot：项目模式用 cwd，全局模式用 THATPERSON_HOME', () =>
     assert.equal(memoryRoot(elsewhere), home, '非项目目录应回退到全局数据目录');
     assert.equal(resolveHistoryDir(elsewhere), path.join(home, 'history'));
   } finally {
-    delete process.env.THATPERSON_HOME;
+    if (savedHome === undefined) delete process.env.THATPERSON_HOME;
+    else process.env.THATPERSON_HOME = savedHome;
   }
 });
