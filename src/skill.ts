@@ -111,6 +111,8 @@ export function listSkills(projectSkillsDirs: string[] = []): SkillInfo[] {
 export function loadSkill(name: string, projectSkillsDirs: string[] = []): SkillInfo | null {
   const dirs = [...userSkillDirs(), ...projectSkillsDirs];
   const target = name.toLowerCase().replace(/^\/+/, '');
+  // 路径白名单（安全红线 4）：拒绝穿越与路径分隔符，禁止用户输入拼接文件系统路径
+  if (!target || target.includes('..') || /[\\/]/.test(target)) return null;
   for (const dir of dirs) {
     const skillPath = path.join(dir, target, 'SKILL.md');
     if (fs.existsSync(skillPath)) {
