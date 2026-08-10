@@ -10,6 +10,9 @@ dist/
 build/
 dist-test/
 
+# 目录树快照（可再生成，不提交）
+项目报告/*/目录树.md
+
 # 依赖与构建产物
 node_modules/
 
