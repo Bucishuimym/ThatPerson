@@ -12,7 +12,7 @@ import { chat, loadEnv, sectionOf, today, foldSummary, type ChatMessage } from '
 import { loadPresent } from './present';
 import { createMemoryStore } from './memory/store';
 import { extractArchives, buildSessionSummary, detectCrossTurnPatterns } from './parser/archive';
-import { ensureConfigDir, loadConfig } from './config';
+import { ensureConfigDir, loadConfig, memoryRoot, resolveHistoryDir } from './config';
 import { listSkills, matchSkill } from './skill';
 
 const EXIT_CMDS = new Set(['exit', 'quit', '退出', '再见']);
@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const isMock = process.argv.includes('--mock');
   const { home } = ensureConfigDir();
   const config = loadConfig();
-  const store = createMemoryStore();
+  const store = createMemoryStore(memoryRoot());
   store.ensureStructure();
   const present = loadPresent();
   const projectSkillsDirs = [path.resolve(process.cwd(), '.claude', 'skills')];
@@ -36,6 +36,7 @@ async function main(): Promise<void> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
   console.log('[ThatPerson] 持续对话模式已开启' + (isMock ? '（离线演示，不调用 API）' : ''));
   console.log(`[ThatPerson] 全局目录：${home} ｜ 默认模型：${config.model}`);
+  console.log(`[ThatPerson] 记忆目录：${resolveHistoryDir()}`);
   const skills = listSkills(projectSkillsDirs);
   if (skills.length) {
     console.log(`[ThatPerson] 已发现 Skill：${skills.map((s) => s.name).join(' / ')}（输入 /<名称> 直接调用）`);

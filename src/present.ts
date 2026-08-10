@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureConfigDir } from './config';
+import { ensureConfigDir, isProjectMode } from './config';
 
 /** 项目 present/ 目录（相对项目根） */
 const PRESENT_DIR = 'present';
@@ -30,8 +30,10 @@ export function loadPresent(rootDir: string = process.cwd()): string {
   const files = new Map<string, string>();
   // 用户级 ~/.thatperson/present/（全局基线）
   collectDirFiles(path.join(home, 'present'), files);
-  // 项目 present/（同名覆盖用户级；独有文件保留）
-  collectDirFiles(path.resolve(rootDir, PRESENT_DIR), files);
+  // 项目 present/（同名覆盖用户级；独有文件保留；仅项目模式生效）
+  if (isProjectMode(rootDir)) {
+    collectDirFiles(path.resolve(rootDir, PRESENT_DIR), files);
+  }
   const parts: string[] = [];
   for (const file of Array.from(files.keys()).sort()) {
     try {

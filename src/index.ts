@@ -5,6 +5,7 @@
 import { chat, loadEnv, sectionOf, today } from './chat';
 import { loadPresent } from './present';
 import { createMemoryStore } from './memory/store';
+import { memoryRoot } from './config';
 import { extractArchives, buildSessionSummary } from './parser/archive';
 
 loadEnv();
@@ -14,7 +15,7 @@ const isMock = process.argv.includes('--mock');
 const prompt = process.argv.slice(2).filter((a) => a !== '--mock')[0] ?? '今天过得怎么样？';
 
 async function main(): Promise<void> {
-  const store = createMemoryStore();
+  const store = createMemoryStore(memoryRoot());
   store.ensureStructure();
   const memories = await store.load();
   const present = loadPresent();
