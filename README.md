@@ -1,6 +1,6 @@
 # ThatPerson
 
-无限接近人的个人 AI 伴侣：**API = 大脑 / skill = 手 / Markdown = 记忆**。对话式 CLI，带长期记忆归档、技能系统与能力自省人格（Present）。
+无限接近人的个人 AI 管家：**API = 大脑 / skill = 手 / Markdown = 记忆**。对话式 CLI，带长期记忆归档、技能系统与能力自省人格（Present）。
 
 ## 安装
 
@@ -31,12 +31,13 @@ thatperson config get model
 - 全局目录：`~/.thatperson/`（可通过 `THATPERSON_HOME` 重定向；`THATPERSON_MEMORY_DIR` 可指定记忆目录）。
 - 项目模式：在项目根运行并存在 `present/` 时，加载项目人格覆盖；记忆落 `<cwd>/history/`。
 - 出厂技能库随包发布（`skills/`），用户级 `~/.thatperson/skills/` 可扩展。
+- 人格加载优先级：**用户级 `~/.thatperson/present/` > 项目级 `<cwd>/present/` > 出厂级（包内 `present/`）**；缺失文件自动回退下一级，同名不覆盖。
 
 ## 发布内容（files 白名单）
 
 发布运行时必需目录：`dist/`（编译产物）、`present/`（出厂人格）与`skills/`（出厂技能库）。资源文件、反馈、项目报告与 API Key 均不打包、不提交。
 
-出厂人格兑底：用户级 `~/.thatperson/present/` 与项目级 `<cwd>/present/` 均无某文件时，自动回退加载包内出厂 present/（同名优先用户/项目，不覆盖）。
+出厂人格兜底：加载优先级为用户级 `~/.thatperson/present/` > 项目级 `<cwd>/present/` > 出厂级（包内 `present/`）；缺失的文件名自动回退出厂补齐，同名不覆盖。
 ## 版本规范（Semver）
 
 每次发布遵循语义化版本，使用 `npm version` 自动升级并打 tag：
