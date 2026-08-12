@@ -10,7 +10,7 @@ npm install -g @nineteenfolk/thatperson
 
 ## 环境要求
 
-- Node.js ≥ 18（**声明值**；注意：当前 UI 依赖链为 ESM-only，实际开箱即用最低为 Node ≥ 22.13 / 23.5+，开发验证环境为 Node 24）。
+- Node.js ≥ 22.13（当前 UI 依赖链为 ESM-only，require(esm) 需 Node ≥ 22.12 默认启用；inquirer@14 要求 ≥ 22.13；开发验证环境为 Node 24）。
 - 需要 DeepSeek API Key：写入项目根 `.env` 的 `AAGENTDS_API_KEY`（或配置为环境变量）。CLI 不硬编码、不打印 Key。
 
 ## 快速开始
