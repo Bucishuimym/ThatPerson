@@ -1,0 +1,14 @@
+# 发布排除：技能运行缓存与编译垃圾（发布前已物理清理，此处作双重保险）
+**/__pycache__/
+*.pyc
+__pycache__/
+
+# 密钥与本地环境（正常已被 .gitignore 排除）
+.env
+.env.*
+*.key
+*key*.md
+
+# 系统/编辑器垃圾
+.DS_Store
+Thumbs.db
