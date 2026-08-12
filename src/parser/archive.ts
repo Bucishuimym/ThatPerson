@@ -222,6 +222,20 @@ const PREF_RULES: PrefRule[] = [
   { re: /(?:我)?(?:每天|经常|总是|习惯性|每天早上|每晚)([^，。！？!?；;、\n]{0,16})/g, polarity: 'pos', confidence: '中' },
 ];
 
+/**
+ * P0 否定前置检测：正向「喜欢」类命中前紧邻的否定/不确定前缀。
+ * 命中即拦截正向命中，避免「不喜欢/不太喜欢/不确定…喜欢」同时产出正负双极性。
+ */
+const NEG_BEFORE_LIKE =
+  /(?:不|没|不太|不怎么|不是很|不是|是不是|并不|从不|从来不|还没|没太|不确定|不一定|未必|说不定|从未|毫不|毫无|甭|莫)$/;
+
+/** P0 疑问标记：wh-词与疑问语气词，疑问句不进偏好对象 */
+const QUESTION_MARKS =
+  /干什么|什么|怎么样|怎样|咋|咋样|啥|哪个|哪些|谁|谁家|哪里|哪儿|怎么|多少|为什么|为啥|几点|何时|吗|嘛|吧|呢/;
+
+/** P0 不确定性词：同句出现则置信度降为「中」并标注待确认，不得标「高」 */
+const UNCERTAIN_WORDS = /不确定|也许|可能|说不定|不一定|说不准|大概|或许/;
+
 /** 负向偏好缺少对象时，向前回溯最近分隔符前的名词短语（3c：过滤场景词，对象=燕麦拿铁≠咖啡馆） */
 function backtrackObject(text: string, matchIndex: number): string {
   const before = text.slice(0, matchIndex);
@@ -260,7 +274,20 @@ function extractPrefs(userText: string): PrefHit[] {
         continue;
       }
       seen.add(key);
+      // P0 否定前置：正向命中前紧邻否定/不确定词时跳过，只保留负向归档
+      if (rule.polarity === 'pos' && NEG_BEFORE_LIKE.test(userText.slice(Math.max(0, pos - 6), pos))) {
+        rule.re.lastIndex = pos + 1;
+        continue;
+      }
       const object = cleanObject(m[1] || '');
+      // P0 疑问句过滤：对象或所在句子含 wh-词/疑问语气词，或句子以问号结尾时跳过
+      const [sentStart, sentEnd] = sentenceBounds(userText, pos);
+      const sentence = userText.slice(sentStart, sentEnd);
+      const endsWithQuestionMark = /[？?]/.test(userText[sentEnd] ?? '');
+      if (QUESTION_MARKS.test(object) || QUESTION_MARKS.test(sentence) || endsWithQuestionMark) {
+        rule.re.lastIndex = pos + 1;
+        continue;
+      }
       // 正向偏好无明确对象时跳过（避免「喜欢，」式误报）；负向偏好回溯前文取对象
       if (!object && rule.polarity === 'pos') {
         rule.re.lastIndex = m.index + Math.max(m[0].length, 1);
@@ -268,16 +295,20 @@ function extractPrefs(userText: string): PrefHit[] {
       }
       const target = object || backtrackObject(userText, m.index);
       const polarityText = rule.polarity === 'pos' ? '喜欢' : '不喜欢';
+      // P0 不确定性降级：同句含「不确定/也许/可能/不一定」等时置信度降为「中」并标注待确认
+      const uncertain = UNCERTAIN_WORDS.test(sentence);
       const insight =
-        rule.confidence === '高'
-          ? '用户' + polarityText + (target ? '「' + target + '」' : '') + '，明确陈述。'
-          : '用户可能习惯「' + (target || '某事物') + '」，从日常表述推断。';
+        uncertain
+          ? '用户可能' + polarityText + (target ? '「' + target + '」' : '') + '，表述不确定，待确认。'
+          : rule.confidence === '高'
+            ? '用户' + polarityText + (target ? '「' + target + '」' : '') + '，明确陈述。'
+            : '用户可能习惯「' + (target || '某事物') + '」，从日常表述推断。';
       const dialog = dialogSnippet(userText, pos, 24);
       const entry: ArchiveEntry = {
         type: '偏好',
         dialog,
         insight,
-        confidence: rule.confidence,
+        confidence: uncertain ? '中' : rule.confidence,
         tags: makeTags(dialog + object, '偏好'),
       };
       hits.push({ entry, polarity: rule.polarity, object });

@@ -7,7 +7,8 @@
  * - SEC-3 检索命中注入：命中内容置于 <检索命中> 边界内，不进指令区
  * - SEC-4 路径穿越：非法 section 与未知归档类型均拒绝
  * - SEC-5 Skill 注入：SKILL.md 内容仅作为数据返回，不注入 System Prompt
- * - SEC-6 静态卫生：src 无硬编码 Key、网络仅白名单端点、零运行时依赖
+ * - SEC-6 静态卫生：src 无硬编码 Key、网络仅白名单端点、无对外部域名的 fetch/网络调用
+ *   （Key 明文仅允许存在于 .env / API-key.md，均被 .gitignore 排除）
  * - SEC-7 离线隔离：--mock 不读 Key、不发网络，可在无凭据环境安全回归
  * - SEC-8 Skill 路径白名单：穿越名与路径分隔符一律拒绝
  * - SEC-9 summary 注入：折叠摘要置于 <早前对话摘要> 边界，不进指令区
@@ -156,7 +157,7 @@ test('SEC-9 summary 注入：折叠摘要置于 <早前对话摘要> 边界，�
   assert.ok(!beforeBlock.includes(INJECT), '注入不得进入指令区');
 });
 
-test('SEC-6 静态卫生：src 无硬编码 Key、网络仅白名单端点、零运行时依赖', () => {
+test('SEC-6 静态卫生：src 无硬编码 Key、网络仅白名单端点、无对外部域名的 fetch/网络调用', () => {
   const srcDir = path.resolve(__dirname, '..', 'src');
   const files: string[] = [];
   const walk = (d: string): void => {
@@ -167,9 +168,56 @@ test('SEC-6 静态卫生：src 无硬编码 Key、网络仅白名单端点、零
     }
   };
   walk(srcDir);
+  // ① src 无硬编码 Key
   for (const f of files) {
     const content = fs.readFileSync(f, 'utf8');
     assert.ok(!/sk-[A-Za-z0-9]{16,}/.test(content), `发现疑似硬编码 Key：${f}`);
   }
+  // ② 网络仅白名单端点
   assert.equal(BASE_URL, 'https://api.deepseek.com', '网络端点应仅白名单 DeepSeek 官方地址');
+  // ③ 无对非白名单域名的 fetch/网络调用：URL 字面量仅白名单，fetch 一律基于 BASE_URL
+  for (const f of files) {
+    const content = fs.readFileSync(f, 'utf8');
+    const urls = content.match(/https?:\/\/\S+/g) ?? [];
+    for (const url of urls) {
+      assert.ok(
+        url.startsWith(BASE_URL),
+        `发现非白名单网络端点 ${url}（${f}）——新增外部调用须先经供应链评审并登记白名单`,
+      );
+    }
+    for (const line of content.split('\n')) {
+      if (line.includes('fetch(')) {
+        assert.ok(
+          line.includes('BASE_URL'),
+          `fetch 调用必须基于白名单 BASE_URL，不得直连任意域名（${f}）：${line.trim()}`,
+        );
+      }
+    }
+  }
+  // ④ Key 明文只允许存在于 .env / API-key.md（二者均被 .gitignore 排除，不随仓库分发）
+  const root = path.resolve(__dirname, '..', '..');
+  const leaks: string[] = [];
+  const scanTree = (d: string): void => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (['node_modules', '.git', 'dist', 'dist-test', '.claude', '.codex', '.agents', '.idea'].includes(e.name)) {
+          continue;
+        }
+        scanTree(p);
+      } else if (e.name !== '.env' && e.name !== 'API-key.md') {
+        try {
+          const content = fs.readFileSync(p, 'utf8');
+          if (/sk-[A-Za-z0-9]{16,}/.test(content)) leaks.push(path.relative(root, p));
+        } catch {
+          // 跳过不可读/二进制文件
+        }
+      }
+    }
+  };
+  scanTree(root);
+  assert.deepEqual(leaks, [], `Key 不得出现在 .env/API-key.md 之外的文件：${leaks.join('、')}`);
+  for (const name of ['.env', 'API-key.md']) {
+    assert.ok(fs.existsSync(path.join(root, name)), `密钥载体 ${name} 应存在（Key 唯一允许位置）`);
+  }
 });

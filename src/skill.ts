@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { thatPersonHome } from './config';
+import { listDisabledSkills, thatPersonHome } from './config';
 
 export interface SkillInfo {
   name: string;
@@ -21,20 +21,43 @@ export type SkillMatch = { skill: SkillInfo; via: 'slash' | 'auto' };
 
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
 
-/** 解析 SKILL.md frontmatter（name/description/trigger_keywords） */
+/** 出厂技能库：包内 skills/ 目录（编译产物位于 dist/src/，向上两级定位包根） */
+const PACKAGE_SKILLS_DIR = path.resolve(__dirname, '..', '..', 'skills');
+
+/** 默认技能扫描目录：出厂技能库（包内 skills/），用户级 ~/.thatperson/skills/ 仍优先 */
+function defaultSkillDirs(): string[] {
+  return [PACKAGE_SKILLS_DIR];
+}
+
+/** 解析 SKILL.md frontmatter（name/description/trigger_keywords；支持多行 YAML 列表） */
 function parseFrontmatter(content: string): { name?: string; description?: string; trigger_keywords?: string } {
   const m = FRONTMATTER_RE.exec(content);
   if (!m) return {};
   const meta: Record<string, string> = {};
+  let listKey = '';
   for (const line of m[1].split('\n')) {
+    // 多行 YAML 列表续行（如 trigger_keywords: 下的 "  - 关键词"）：收集为逗号分隔，供 parseTriggerKeywords 消费
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    if (item && listKey) {
+      const value = item[1].trim().replace(/^['"]|['"]$/g, '').trim();
+      if (value) meta[listKey] = meta[listKey] ? `${meta[listKey]},${value}` : value;
+      continue;
+    }
     const idx = line.indexOf(':');
-    if (idx === -1) continue;
+    if (idx === -1) {
+      listKey = '';
+      continue;
+    }
     const key = line.slice(0, idx).trim();
     const val = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '').trim();
-    if (key) meta[key] = val;
+    if (key) {
+      meta[key] = val;
+      listKey = val === '' ? key : '';
+    }
   }
   return meta;
 }
+
 
 /** 解析 trigger_keywords（支持数组 JSON 或逗号分隔） */
 function parseTriggerKeywords(raw: string | undefined): string[] {
@@ -81,8 +104,10 @@ function userSkillDirs(): string[] {
 }
 
 /** 扫描所有 Skill（用户级优先；同名去重） */
-export function listSkills(projectSkillsDirs: string[] = []): SkillInfo[] {
+export function listSkills(projectSkillsDirs: string[] = defaultSkillDirs()): SkillInfo[] {
   const dirs = [...userSkillDirs(), ...projectSkillsDirs];
+  // 第 4 期（D-3b）：过滤 config.json 中 disabledSkills 已禁用的技能（skills disable/enable 持久化）
+  const disabled = new Set(listDisabledSkills());
   const seen = new Set<string>();
   const out: SkillInfo[] = [];
   for (const dir of dirs) {
@@ -98,7 +123,7 @@ export function listSkills(projectSkillsDirs: string[] = []): SkillInfo[] {
       const skillPath = path.join(dir, entry.name, 'SKILL.md');
       if (!fs.existsSync(skillPath)) continue;
       const info = readSkill(skillPath);
-      if (info && !seen.has(info.name)) {
+      if (info && !disabled.has(info.name) && !seen.has(info.name)) {
         seen.add(info.name);
         out.push(info);
       }
@@ -108,7 +133,7 @@ export function listSkills(projectSkillsDirs: string[] = []): SkillInfo[] {
 }
 
 /** 按名称加载 Skill（用户级优先） */
-export function loadSkill(name: string, projectSkillsDirs: string[] = []): SkillInfo | null {
+export function loadSkill(name: string, projectSkillsDirs: string[] = defaultSkillDirs()): SkillInfo | null {
   const dirs = [...userSkillDirs(), ...projectSkillsDirs];
   const target = name.toLowerCase().replace(/^\/+/, '');
   // 路径白名单（安全红线 4）：拒绝穿越与路径分隔符，禁止用户输入拼接文件系统路径
@@ -128,7 +153,7 @@ export function loadSkill(name: string, projectSkillsDirs: string[] = []): Skill
  * - slash：输入以 / 开头 → 精确匹配名称，其次前缀匹配（≥2 字符）。
  * - auto：trigger_keywords 命中（description 自动触发保留：description 首词段命中时也激活）。
  */
-export function matchSkill(input: string, projectSkillsDirs: string[] = []): SkillMatch | null {
+export function matchSkill(input: string, projectSkillsDirs: string[] = defaultSkillDirs()): SkillMatch | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
   const skills = listSkills(projectSkillsDirs);

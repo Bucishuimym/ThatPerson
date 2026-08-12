@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildSystemPrompt, retrieveRelevant } from '../src/chat';
+import { buildSystemPrompt, retrieveRelevant, buildSkillsSummary, estimateTokens, SYSTEM_TOKEN_BUDGET } from '../src/chat';
+import type { SkillInfo } from '../src/skill';
 import { loadPresent } from '../src/present';
 import type { LoadedMemories } from '../src/memory/types';
 import { isolateHome } from './helpers';
@@ -57,4 +58,45 @@ test('Retrieve：根据用户输入关键词命中记忆片段（轻量检索）
 test('Retrieve：无命中时返回空串', () => {
   const hits = retrieveRelevant('今天天气不错', { ...base, profile: {} });
   assert.equal(hits, '');
+});
+
+
+// ===== 第 4 期（D-3b）：技能摘要层注入 System =====
+
+function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
+  return {
+    name: 'demo-skill',
+    description: '这是一个演示技能。用于验证技能摘要层。',
+    triggerKeywords: ['演示', '测试'],
+    dir: '/tmp',
+    skillPath: '/tmp/SKILL.md',
+    content: 'SECRET_BODY_MARKER_9f3 不应注入 System',
+    ...overrides,
+  };
+}
+
+test('技能摘要：一行一条，含技能名 + 一句描述 + 触发词，不含 SKILL.md 正文', () => {
+  const summary = buildSkillsSummary([makeSkill()]);
+  assert.ok(summary.includes('demo-skill'), '应含技能名');
+  assert.ok(summary.includes('这是一个演示技能'), '应含一句描述');
+  assert.ok(summary.includes('演示 / 测试'), '应含触发词');
+  assert.ok(!summary.includes('SECRET_BODY_MARKER_9f3'), 'SKILL.md 正文不得进入摘要（SEC-5）');
+});
+
+test('System：技能摘要层注入 <技能清单> 边界，正文不注入（SEC-5）', () => {
+  const sys = buildSystemPrompt(base, '', '', '', [makeSkill()]);
+  assert.ok(sys.includes('<技能清单>'));
+  assert.ok(sys.includes('demo-skill'));
+  assert.ok(sys.includes('这是一个演示技能'));
+  assert.ok(sys.includes('</技能清单>'));
+  assert.ok(!sys.includes('SECRET_BODY_MARKER_9f3'), 'SKILL.md 正文不得注入 System Prompt');
+});
+
+test('System：技能摘要层不突破 token 预算', () => {
+  const skills = Array.from({ length: 10 }, (_, i) =>
+    makeSkill({ name: `skill-${i}`, description: `第 ${i} 号演示技能，用于验证预算不破。`, triggerKeywords: ['演示'] }),
+  );
+  const sys = buildSystemPrompt(base, '## 我的元认知', '检索片段', '早前摘要', skills);
+  const tokens = estimateTokens(sys);
+  assert.ok(tokens <= SYSTEM_TOKEN_BUDGET, `估算 ${tokens} token 应 ≤${SYSTEM_TOKEN_BUDGET}`);
 });

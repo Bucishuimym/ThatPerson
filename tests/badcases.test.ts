@@ -188,3 +188,58 @@ test('BC-6 summary 二次折叠：超限保留最新部分，总长受限', () =
   assert.ok(summary.includes('折叠'), '超限时应标记「已折叠」');
   assert.ok(summary.includes(latestUser), '最新一轮内容必须保留');
 });
+
+// ===== BC-7 =====
+
+test('BC-7 负向偏好「其实我不喜欢下雨天」只归档负向、无双极性', () => {
+  const archives = extractArchives('其实我不喜欢下雨天', '');
+  const prefs = archives.filter((a) => a.type === '偏好');
+  const neg = prefs.find((a) => a.insight.includes('不喜欢'));
+  assert.ok(
+    neg,
+    `应提取负向偏好条目，实际：${JSON.stringify(archives.map((a) => `${a.type}|${a.insight}`))}`,
+  );
+  assert.ok(neg!.insight.includes('下雨天'), `负向对象应为「下雨天」，实际：${neg!.insight}`);
+  // 否定前置检测：`不 … 喜欢` 不得同时产出正负双极性（第四版提示词 edge_cases）
+  const pos = prefs.find((a) => a.insight.includes('喜欢') && !a.insight.includes('不喜欢'));
+  assert.ok(!pos, `不得同时产出正向偏好（双极性），实际：${JSON.stringify(prefs.map((p) => p.insight))}`);
+  assert.ok(
+    !archives.some((a) => a.insight.includes('用户喜欢「下雨天」')),
+    '不得出现「用户喜欢下雨天」式正向归档',
+  );
+});
+
+// ===== BC-8 =====
+
+test('BC-8 疑问句「你记得我喜欢干什么嘛」不归档「喜欢干什么嘛」', () => {
+  const archives = extractArchives('你记得我喜欢干什么嘛', '');
+  const prefs = archives.filter((a) => a.type === '偏好');
+  assert.equal(
+    prefs.length,
+    0,
+    `疑问句不得进入偏好对象（wh-词过滤：干什么/吗/嘛），实际：${JSON.stringify(prefs.map((p) => p.insight))}`,
+  );
+  for (const a of archives) {
+    assert.ok(
+      !(a.insight + a.dialog).includes('干什么嘛'),
+      `不得归档「喜欢干什么嘛」，实际：${a.insight}`,
+    );
+  }
+});
+
+// ===== BC-9 =====
+
+test('BC-9 不确定性「我都不确定我喜不喜欢上课」无双极性、置信度不标「高」', () => {
+  const archives = extractArchives('我都不确定我喜不喜欢上课', '');
+  const prefs = archives.filter((a) => a.type === '偏好');
+  const neg = prefs.filter((p) => p.insight.includes('不喜欢'));
+  const pos = prefs.filter((p) => p.insight.includes('喜欢') && !p.insight.includes('不喜欢'));
+  assert.ok(
+    !(neg.length > 0 && pos.length > 0),
+    `「不确定」表述不得同时产出正负双极性，实际：${JSON.stringify(prefs.map((p) => p.insight))}`,
+  );
+  for (const p of prefs) {
+    assert.notEqual(p.confidence, '高', `不确定表述不得标「高」，实际：${p.insight}（${p.confidence}）`);
+    assert.ok(['中', '低'].includes(p.confidence), `不确定表述应降级为「中/低」，实际：${p.confidence}`);
+  }
+});
