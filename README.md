@@ -34,8 +34,9 @@ thatperson config get model
 
 ## 发布内容（files 白名单）
 
-仅发布运行时必需目录：`dist/`（编译产物）与 `skills/`（出厂技能库）。资源文件、反馈、项目报告与 API Key 均不打包、不提交。
+发布运行时必需目录：`dist/`（编译产物）、`present/`（出厂人格）与`skills/`（出厂技能库）。资源文件、反馈、项目报告与 API Key 均不打包、不提交。
 
+出厂人格兑底：用户级 `~/.thatperson/present/` 与项目级 `<cwd>/present/` 均无某文件时，自动回退加载包内出厂 present/（同名优先用户/项目，不覆盖）。
 ## 版本规范（Semver）
 
 每次发布遵循语义化版本，使用 `npm version` 自动升级并打 tag：

@@ -100,3 +100,23 @@ test('System：技能摘要层不突破 token 预算', () => {
   const tokens = estimateTokens(sys);
   assert.ok(tokens <= SYSTEM_TOKEN_BUDGET, `估算 ${tokens} token 应 ≤${SYSTEM_TOKEN_BUDGET}`);
 });
+
+
+// ===== Present 出厂兑底（发布后全局部署场景）=====
+
+test('Present：全局部署（隔离 home 空 + 非项目 cwd）时回退包内出厂人格', () => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-nopresent-'));
+  const present = loadPresent(empty);
+  assert.ok(present.length > 0, '应加载包内出厂 present（identity/behavior/capabilities/output/persona）');
+  assert.ok(present.includes('ThatPerson'), '出厂人格应含身份声明');
+  assert.ok(present.includes('行为准则') || present.includes('能力清单'), '应补齐出厂人格其他维度');
+});
+
+test('Present：用户级同名文件优先于包内出厂（按名补缺不覆盖）', () => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-nopresent2-'));
+  fs.mkdirSync(path.join(iso.home, 'present'), { recursive: true });
+  fs.writeFileSync(path.join(iso.home, 'present', 'identity.md'), '# 用户自定义身份\n', 'utf8');
+  const present = loadPresent(empty);
+  assert.ok(present.includes('用户自定义身份'), '用户级 identity 应优先于包内出厂');
+  assert.ok(present.includes('行为准则'), '用户缺失的维度（behavior）应由包内出厂补齐');
+});

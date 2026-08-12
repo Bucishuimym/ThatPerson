@@ -176,3 +176,9 @@ test('config：api-key 引导文案不含硬编码 Key，无 Key 判定正确', 
     else process.env.AAGENTDS_API_KEY = saved;
   }
 });
+
+test('isProjectMode：cwd 为本项目 scoped 包名（@nineteenfolk/thatperson）时为 true', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-cfg-scoped-'));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@nineteenfolk/thatperson' }), 'utf8');
+  assert.equal(isProjectMode(root), true);
+});

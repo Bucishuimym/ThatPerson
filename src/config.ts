@@ -186,7 +186,7 @@ export function isProjectMode(cwd: string = process.cwd()): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8')) as { name?: string };
     const name = (pkg.name ?? '').toLowerCase();
-    if (name === 'thatperson') return true;
+    if (name === 'thatperson' || name === '@nineteenfolk/thatperson') return true;
   } catch {
     // 无 package.json 时继续按源码特征判定
   }

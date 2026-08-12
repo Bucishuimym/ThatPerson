@@ -11,6 +11,9 @@ import { ensureConfigDir, isProjectMode } from './config';
 /** 项目 present/ 目录（相对项目根） */
 const PRESENT_DIR = 'present';
 
+/** 包内出厂 present/（dist/src 上溯 3 级到包根；发布后 = node_modules/@nineteenfolk/thatperson/present） */
+const PACKAGE_PRESENT_DIR = path.join(__dirname, '..', '..', 'present');
+
 /** 收集目录下全部 .md 文件内容：文件名 -> 路径 */
 function collectDirFiles(dir: string, target: Map<string, string>): void {
   let files: string[];
@@ -33,6 +36,16 @@ export function loadPresent(rootDir: string = process.cwd()): string {
   // 项目 present/（同名覆盖用户级；独有文件保留；仅项目模式生效）
   if (isProjectMode(rootDir)) {
     collectDirFiles(path.resolve(rootDir, PRESENT_DIR), files);
+  }
+
+  // 包内出厂兑底：用户级/项目级缺失的文件名用出厂人格补齐（同名优先用户/项目，不覆盖）
+  try {
+    const packageFiles = fs.readdirSync(PACKAGE_PRESENT_DIR).filter((f) => f.endsWith('.md'));
+    for (const file of packageFiles) {
+      if (!files.has(file)) files.set(file, path.join(PACKAGE_PRESENT_DIR, file));
+    }
+  } catch {
+    // 包内出厂目录不存在（如源码直跑时无 dist）则跳过
   }
   const parts: string[] = [];
   for (const file of Array.from(files.keys()).sort()) {
