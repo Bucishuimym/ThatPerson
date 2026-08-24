@@ -151,7 +151,7 @@ export function formatHelp(): string {
     '',
     '全局指令（thatperson <子命令>）：',
     '  status      显示系统状态卡片（版本/模型/记忆/技能/Token 预算/目录）',
-    '  update      手动检查更新（绕过 12h 缓存；开发/本地路径仍跳过）',
+    '  update      手动检查更新（绕过 12h 缓存；THATPERSON_DEV 开发模式仍跳过）',
     '  setup       首次配置向导（输入 API Key 与模型，写回 config.json）',
     '  wizard      setup 的别名',
     '  reset       重置配置（仅保留 apiKey 与 model；--keep-present 保留 present 覆盖）',
@@ -508,7 +508,7 @@ function createInternalCommands(
         return;
       }
       if (shouldSkipUpdateCheck(process.cwd())) {
-        logger.info('跳过更新检查（开发/本地路径）');
+        logger.info('跳过更新检查（THATPERSON_DEV 开发模式）');
         return;
       }
       logger.info('正在检查更新…');
@@ -702,7 +702,7 @@ export async function runGlobalCommand(
         return 0;
       }
       if (shouldSkipUpdateCheck(process.cwd())) {
-        logger.info('跳过更新检查（开发/本地路径）');
+        logger.info('跳过更新检查（THATPERSON_DEV 开发模式）');
         return 0;
       }
       logger.info('正在检查更新…');

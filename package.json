@@ -1,6 +1,6 @@
 {
   "name": "@nineteenfolk/thatperson",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "ThatPerson - 个人 AI 管家 CLI",
   "main": "dist/src/index.js",
   "bin": {

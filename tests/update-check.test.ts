@@ -1,6 +1,6 @@
 /**
  * 更新检查测试（第 4 期 · S-07/S-08/S-18）
- * 覆盖：12h 缓存生效 / force 绕过缓存 / THATPERSON_DEV 与 G:\XXFS\ 路径跳过 /
+ * 覆盖：12h 缓存生效 / force 绕过缓存 / THATPERSON_DEV 跳过（本地路径不再豁免）/
  *       404 与网络错误静默失败 / version 数字分段比较 / 有新版时输出提示。
  * 全部离线：fetch 使用本地 stub，不发起真实网络请求。
  */
@@ -134,8 +134,8 @@ test('shouldSkipUpdateCheck：THATPERSON_DEV=true 时跳过', () => {
   }
 });
 
-test('shouldSkipUpdateCheck：cwd 以 G:\\XXFS\\ 开头时跳过', () => {
-  assert.equal(shouldSkipUpdateCheck('G:\\XXFS\\Webstorm\\project\\ThatPerson'), true);
+test('shouldSkipUpdateCheck：cwd 不再影响跳过判断（本地路径不豁免）', () => {
+  assert.equal(shouldSkipUpdateCheck('G:\\XXFS\\Webstorm\\project\\ThatPerson'), false);
   assert.equal(shouldSkipUpdateCheck(tmpCwd()), false);
 });
 
@@ -192,14 +192,15 @@ test('checkForUpdates：THATPERSON_DEV=true 直接跳过（不发网络）', asy
   }
 });
 
-test('checkForUpdates：cwd 含 G:\\XXFS\\ 时跳过（本地开发绕过 404）', async () => {
+test('checkForUpdates：cwd 含 G:\\XXFS\\ 时正常检查（本地路径不再跳过）', async () => {
+  resetCache();
   const calls = stubFetch('1.1.0');
   await checkForUpdates({
     cwd: 'G:\\XXFS\\Webstorm\\project\\ThatPerson',
     currentVersion: '1.0.0',
     registryUrl: 'https://stub.test/latest',
   });
-  assert.equal(calls.calls, 0);
+  assert.equal(calls.calls, 1, '本地路径不应跳过，应发起网络检查');
 });
 
 test('checkForUpdates：404 静默失败（不抛错、不打印、不阻塞）', async () => {

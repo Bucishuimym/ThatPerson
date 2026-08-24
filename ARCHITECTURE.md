@@ -63,7 +63,7 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
                   └─ 工具结果以 {role:'tool'} 回灌 → 自动再调 chat()（回灌器，SEC-11 边界）
       │
       └─ 更新检查 checkForUpdates ［utils/update-check.ts］
-            ├─ 12h 缓存 ~/.thatperson/.last-update-check；THATPERSON_DEV / G:\XXFS\ 路径跳过
+            ├─ 12h 缓存 ~/.thatperson/.last-update-check；仅 THATPERSON_DEV=true 跳过（本地路径不豁免）
             └─ registry.npmjs.org/@nineteenfolk%2fthatperson/latest（3s 超时）；404/超时/解析失败静默
       │
       ├─ history 维护：保留最近 4 轮完整（8 条），更早轮次折叠进 summary（转义后）

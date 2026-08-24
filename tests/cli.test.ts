@@ -234,9 +234,16 @@ test('runGlobalCommand(help)：打印帮助并返回 0', async () => {
   assert.ok(logs.join('\n').includes('ThatPerson CLI 帮助'));
 });
 
-test('runGlobalCommand(update)：本地开发路径跳过更新检查', async () => {
-  const logs = await withCapturedLog(() => runGlobalCommand('update', []));
-  assert.ok(logs.some((l) => l.includes('跳过更新检查')));
+test('runGlobalCommand(update)：THATPERSON_DEV=true 时跳过更新检查', async () => {
+  const saved = process.env.THATPERSON_DEV;
+  process.env.THATPERSON_DEV = 'true';
+  try {
+    const logs = await withCapturedLog(() => runGlobalCommand('update', []));
+    assert.ok(logs.some((l) => l.includes('跳过更新检查')));
+  } finally {
+    if (saved === undefined) delete process.env.THATPERSON_DEV;
+    else process.env.THATPERSON_DEV = saved;
+  }
 });
 
 test('runGlobalCommand：未知子命令 → 提示 + 帮助 + 退出码 1', async () => {

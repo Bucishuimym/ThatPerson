@@ -5,7 +5,7 @@
  * - 向 scoped 包 registry 查询（https://registry.npmjs.org/@nineteenfolk%2fthatperson/latest）；
  * - 仅当 latest > current（数字分段比较，避免引入 semver 依赖）时输出更新提示；
  * - 12h 缓存落 thatPersonHome()/.last-update-check（支持 THATPERSON_HOME 重定向，与 IS-1~3 隔离口径一致）；
- * - THATPERSON_DEV=true 或 cwd 以 G:\XXFS\ 开头时跳过（本地开发 / 包未发布 404 绕过）；
+ * - THATPERSON_DEV=true 时跳过（显式开发模式）；本地路径不再豁免，已安装用户可正常检查更新；
  * - 404 / 网络错误 / 超时 / JSON 解析失败 / 缓存写失败：全部静默返回，不打印、不阻塞启动。
  */
 import fs from 'node:fs';
@@ -71,10 +71,9 @@ export function readCurrentVersion(cwd?: string): string {
   }
 }
 
-/** 跳过策略（S-08）：THATPERSON_DEV=true；cwd 以 G:\XXFS\ 开头（本地开发路径） */
+/** 跳过策略（S-08 修订）：仅 THATPERSON_DEV=true 时跳过；cwd 不再参与判断（本地路径可正常检查） */
 export function shouldSkipUpdateCheck(cwd = process.cwd()): boolean {
   if (process.env.THATPERSON_DEV === 'true') return true;
-  if (typeof cwd === 'string' && cwd.startsWith('G:\\XXFS\\')) return true;
   return false;
 }
 
@@ -127,6 +126,6 @@ export async function checkForUpdates(opts: UpdateCheckOptions = {}): Promise<vo
   const latest = await fetchLatestVersion(opts.registryUrl ?? REGISTRY_URL);
   if (!latest) return;
   if (isNewerVersion(latest, current)) {
-    console.log(`✨ ThatPerson 新版本 ${latest} 可用！当前 ${current}。升级：npm install -g thatperson@latest`);
+    console.log(`✨ ThatPerson 新版本 ${latest} 可用！当前 ${current}。升级：npm install -g @nineteenfolk/thatperson@latest`);
   }
 }
