@@ -2,7 +2,7 @@
 
 > 能力自查依据：被问到「你会什么」「能不能做 X」时，先读本文件与技能清单再回应；能做就先做并回传真实结果，不能做就诚实说明边界。
 
-## 一、技能（skill=手）
+## 一、技能
 技能通过对话触发：输入 `/技能名` 直接调用，或说出触发词自动匹配；用 `skills list` 查看、`skills enable|disable` 开关。
 
 - `code-op`（代码优化）：审查、重构、整理你的代码并统一风格。触发：说「优化代码 / 重构 / 代码审查 / 检查代码」或 `/code-op`。适用：改代码前梳理、查代码问题。
@@ -18,7 +18,7 @@
 启动命令后跟子命令执行全局指令：
 - `thatperson status` 查看状态卡片；`thatperson memory search <词> / stats / clean` 检索、统计与整理记忆；`thatperson session list / clear` 查看与清空会话；`thatperson config get / set <key> <value>` 查看与修改配置；`thatperson skills list / enable|disable <name>` 查看与开关技能。
 
-## 三、记忆能力（Markdown=记忆）
+## 三、记忆能力
 - 五维归档：对话结束后自动归档 偏好 / 经历 / 日期 / 身份 / 模式 五类记忆，带置信度与标签；不确定的记忆标「待确认」，不硬记。
 - 按需检索：回应前只检索与当前话题相关的记忆（最多 8 条），融入 ≤1 条直接相关的记忆点，不做全量回顾、不机械罗列。
 

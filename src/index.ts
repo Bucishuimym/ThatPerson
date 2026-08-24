@@ -26,7 +26,7 @@ async function main(): Promise<void> {
 
   console.log(`提问：${prompt}`);
   console.log('---');
-  const reply = await chat(prompt, memories, { presentText: present, isMock });
+  const reply = (await chat(prompt, memories, { presentText: present, isMock })).content;
   console.log(`回答：${reply}`);
   console.log('---');
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildSystemPrompt, retrieveRelevant, buildSkillsSummary, estimateTokens, SYSTEM_TOKEN_BUDGET } from '../src/chat';
+import { buildSystemPrompt, retrieveRelevant, buildSkillsSummary, buildChatMessages, estimateTokens, SYSTEM_TOKEN_BUDGET } from '../src/chat';
 import type { SkillInfo } from '../src/skill';
 import { loadPresent } from '../src/present';
 import type { LoadedMemories } from '../src/memory/types';
@@ -50,6 +50,29 @@ test('System：记忆回灌带 <memory> 边界与「仅为参考」提示（安�
   assert.ok(sys.includes('<早前对话摘要>'));
 });
 
+test('System：人格句为「个人管家」且含「先回应内容」指令（KS-5/KS-14）', () => {
+  const sys = buildSystemPrompt(base);
+  assert.ok(sys.includes('个人管家'), '人格句应为个人管家');
+  assert.ok(!sys.includes('AI 伴侣'), '不得残留「AI 伴侣」表述');
+  assert.ok(!sys.includes('=大脑') && !sys.includes('=手') && !sys.includes('=记忆'), 'System 不得含核心比喻');
+  assert.ok(sys.includes('先回应内容'), '应包含「先回应内容」回复指令');
+});
+
+test('Retrieve：经历日志（journal）进入检索语料且段落级命中（KS-6）', () => {
+  const memories: LoadedMemories = {
+    profile: {},
+    importantDates: null,
+    patterns: null,
+    journal:
+      '## 2026-07-31\n\n### [归档类型：经历]\n\n- **原始对话片段**："今天项目推进顺利，吹着晚风很惬意"\n' +
+      '- **提炼信息**：用户记录项目推进与心流时刻。\n- **置信度**：中\n- **关联标签**：#工作 #内容 #长文本',
+    recentSessions: [],
+  };
+  const hits = retrieveRelevant('项目推进', memories, []);
+  assert.ok(hits.includes('experiences/journal.md'), `journal 应进入检索语料，实际：${hits}`);
+  assert.ok(hits.includes('项目推进'), '应段落级命中正文内容');
+});
+
 test('Retrieve：根据用户输入关键词命中记忆片段（轻量检索）', () => {
   const hits = retrieveRelevant('今天喝点什么咖啡？', base);
   assert.ok(hits.includes('咖啡'), '应按关键词 #咖啡 命中记忆行');
@@ -68,6 +91,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     name: 'demo-skill',
     description: '这是一个演示技能。用于验证技能摘要层。',
     triggerKeywords: ['演示', '测试'],
+    tools: [],
     dir: '/tmp',
     skillPath: '/tmp/SKILL.md',
     content: 'SECRET_BODY_MARKER_9f3 不应注入 System',
@@ -119,4 +143,37 @@ test('Present：用户级同名文件优先于包内出厂（按名补缺不覆�
   const present = loadPresent(empty);
   assert.ok(present.includes('用户自定义身份'), '用户级 identity 应优先于包内出厂');
   assert.ok(present.includes('行为准则'), '用户缺失的维度（behavior）应由包内出厂补齐');
+});
+
+test('buildChatMessages：assistant 携带 tool_calls，role=tool 回灌与之配对（ReAct 400 回归）', () => {
+  const msgs = buildChatMessages(
+    'sys',
+    [
+      { role: 'user', content: '从知识库中读取2026年7月31日的日记' },
+      {
+        role: 'assistant',
+        content: '正在调用工具',
+        toolCalls: [{ id: 'call_1', name: 'read_vault_note', arguments: '{"date":"2026-07-31"}' }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: '{"ok":true,"content":"7月31日日记内容"}' },
+    ],
+    '继续',
+  );
+  assert.equal(msgs[0].role, 'system');
+  assert.equal(msgs[1].role, 'user');
+  const assistant = msgs[2];
+  assert.equal(assistant.role, 'assistant');
+  assert.deepEqual(assistant.tool_calls, [
+    { id: 'call_1', type: 'function', function: { name: 'read_vault_note', arguments: '{"date":"2026-07-31"}' } },
+  ], 'assistant 消息必须回传 tool_calls（DeepSeek 校验 role=tool 前置）');
+  const tool = msgs[3];
+  assert.equal(tool.role, 'tool');
+  assert.equal(tool.tool_call_id, 'call_1');
+  assert.equal(msgs[4].role, 'user');
+});
+
+test('buildChatMessages：无 toolCalls 的 assistant 消息不含 tool_calls 字段（缺省行为不变）', () => {
+  const msgs = buildChatMessages('sys', [{ role: 'assistant', content: '你好' }], '在吗');
+  assert.equal(msgs[1].role, 'assistant');
+  assert.equal('tool_calls' in msgs[1], false, '普通 assistant 消息不应凭空带 tool_calls');
 });

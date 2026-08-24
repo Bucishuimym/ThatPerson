@@ -1,17 +1,20 @@
 /**
  * Skill 调用模块（第三版提示词 · 五）
- * 默认 ~/.thatperson/skills/，项目 .claude/skills/ 为可选扩展；两处扫描、同名用户级优先。
+ * 第 5 期批次一（KS-12）：级联 = 主目录 ~/.thatperson/skills/ → 随身目录 <cwd>/.thatperson/skills/ → 包内出厂 skills/；
+ * 同名靠前优先（主目录 > 随身目录 > 出厂/调用方传入）。
  * 触发方式：/skill 名称（cli 中以 / 开头优先匹配）；trigger_keywords 自动触发。
  * 渐进式加载：发现 → 激活 → 执行（仅在触发时读取完整 SKILL.md，节省 token）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { listDisabledSkills, thatPersonHome } from './config';
+import { listDisabledSkills, localThatPersonDir, thatPersonHome } from './config';
 
 export interface SkillInfo {
   name: string;
   description: string;
   triggerKeywords: string[];
+  /** SKILL.md frontmatter 声明的工具名列表（第 5 期 KS-21：技能 = 工具组合说明书） */
+  tools: string[];
   dir: string;
   skillPath: string;
   content: string;
@@ -29,8 +32,13 @@ function defaultSkillDirs(): string[] {
   return [PACKAGE_SKILLS_DIR];
 }
 
-/** 解析 SKILL.md frontmatter（name/description/trigger_keywords；支持多行 YAML 列表） */
-function parseFrontmatter(content: string): { name?: string; description?: string; trigger_keywords?: string } {
+/** 解析 SKILL.md frontmatter（name/description/trigger_keywords/tools；支持多行 YAML 列表） */
+function parseFrontmatter(content: string): {
+  name?: string;
+  description?: string;
+  trigger_keywords?: string;
+  tools?: string;
+} {
   const m = FRONTMATTER_RE.exec(content);
   if (!m) return {};
   const meta: Record<string, string> = {};
@@ -92,20 +100,28 @@ function readSkill(skillPath: string): SkillInfo | null {
     name,
     description: meta.description || '',
     triggerKeywords: parseTriggerKeywords(meta.trigger_keywords),
+    tools: parseTriggerKeywords(meta.tools),
     dir: path.dirname(skillPath),
     skillPath,
     content,
   };
 }
 
-/** 用户级 Skill 目录（默认 ~/.thatperson/skills/） */
+/** 主目录 Skill 目录（默认 ~/.thatperson/skills/） */
 function userSkillDirs(): string[] {
   return [path.join(thatPersonHome(), 'skills')];
 }
 
-/** 扫描所有 Skill（用户级优先；同名去重） */
+/** 随身目录 Skill 目录（<cwd>/.thatperson/skills/；随 localThatPersonDir 判定） */
+function portableSkillDirs(): string[] {
+  const local = localThatPersonDir();
+  if (!local) return [];
+  return [path.join(local, 'skills')];
+}
+
+/** 扫描所有 Skill（主目录优先；同名去重） */
 export function listSkills(projectSkillsDirs: string[] = defaultSkillDirs()): SkillInfo[] {
-  const dirs = [...userSkillDirs(), ...projectSkillsDirs];
+  const dirs = [...userSkillDirs(), ...portableSkillDirs(), ...projectSkillsDirs];
   // 第 4 期（D-3b）：过滤 config.json 中 disabledSkills 已禁用的技能（skills disable/enable 持久化）
   const disabled = new Set(listDisabledSkills());
   const seen = new Set<string>();
@@ -132,9 +148,9 @@ export function listSkills(projectSkillsDirs: string[] = defaultSkillDirs()): Sk
   return out;
 }
 
-/** 按名称加载 Skill（用户级优先） */
+/** 按名称加载 Skill（主目录优先） */
 export function loadSkill(name: string, projectSkillsDirs: string[] = defaultSkillDirs()): SkillInfo | null {
-  const dirs = [...userSkillDirs(), ...projectSkillsDirs];
+  const dirs = [...userSkillDirs(), ...portableSkillDirs(), ...projectSkillsDirs];
   const target = name.toLowerCase().replace(/^\/+/, '');
   // 路径白名单（安全红线 4）：拒绝穿越与路径分隔符，禁止用户输入拼接文件系统路径
   if (!target || target.includes('..') || /[\\/]/.test(target)) return null;

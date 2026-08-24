@@ -2,7 +2,7 @@
  * 更新自动检查（第 4 期 · S-07 / S-08）
  *
  * - 读 package.json version（opts.cwd 供测试注入）；
- * - 向 https://registry.npmjs.org/thatperson/latest 查询（AbortSignal.timeout(3000)）；
+ * - 向 scoped 包 registry 查询（https://registry.npmjs.org/@nineteenfolk%2fthatperson/latest）；
  * - 仅当 latest > current（数字分段比较，避免引入 semver 依赖）时输出更新提示；
  * - 12h 缓存落 thatPersonHome()/.last-update-check（支持 THATPERSON_HOME 重定向，与 IS-1~3 隔离口径一致）；
  * - THATPERSON_DEV=true 或 cwd 以 G:\XXFS\ 开头时跳过（本地开发 / 包未发布 404 绕过）；
@@ -12,8 +12,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { thatPersonHome } from '../config';
 
-/** 官方 registry 最新版接口（包名小写，与发布口径一致） */
-export const REGISTRY_URL = 'https://registry.npmjs.org/thatperson/latest';
+/** 官方 registry 最新版接口（scoped 包名需 URL 编码 @ 与 /：@nineteenfolk%2fthatperson） */
+export const REGISTRY_URL = 'https://registry.npmjs.org/@nineteenfolk%2fthatperson/latest';
 /** 12 小时缓存窗口 */
 export const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 /** 缓存文件名（落 thatPersonHome()） */

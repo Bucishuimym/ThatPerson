@@ -9,8 +9,10 @@
 import path from 'node:path';
 import type { ArchiveEntry, LoadedMemories, MemorySection } from './memory/types';
 import { buildPresentBlock } from './present';
-import { DEFAULT_MODEL, loadConfig } from './config';
+import { DEFAULT_MODEL, loadConfig, resolveApiKey } from './config';
 import { listSkills, type SkillInfo } from './skill';
+import { envInt } from './tools/guards';
+import type { ToolDef } from './tools/types';
 
 /** 仅允许请求 DeepSeek 官方端点（安全红线 6） */
 export const BASE_URL = 'https://api.deepseek.com';
@@ -23,24 +25,24 @@ export const BASE_URL = 'https://api.deepseek.com';
 export const MODEL = DEFAULT_MODEL;
 
 // ===== 3a/3b 预算常量 =====
-/** 检索命中 Top-K 上限 */
-export const RETRIEVE_TOP_K = 8;
-/** 画像层字符预算（≤1KB） */
-export const PROFILE_LAYER_BUDGET = 1024;
+/** 检索命中 Top-K 上限（THATPERSON_RETRIEVE_TOP_K 可调，默认 12） */
+export const RETRIEVE_TOP_K = envInt('THATPERSON_RETRIEVE_TOP_K', 12);
+/** 画像层字符预算（第 5 期起随总预算放大） */
+export const PROFILE_LAYER_BUDGET = 2048;
 /** 日期层字符预算 */
-export const DATE_LAYER_BUDGET = 400;
+export const DATE_LAYER_BUDGET = 800;
 /** 近期层字符预算 */
-export const RECENT_LAYER_BUDGET = 800;
+export const RECENT_LAYER_BUDGET = 1600;
 /** 检索命中层字符预算 */
-export const RETRIEVE_LAYER_BUDGET = 600;
-/** 单轮 system 硬预算（验收标准 ②：≤6000 token） */
-export const SYSTEM_TOKEN_BUDGET = 6000;
-/** 单轮 system 目标预算（3a：≤4000 token） */
-export const SYSTEM_TOKEN_TARGET = 4000;
-/** summary 字符上限（3d），超限二次折叠 */
-export const SUMMARY_CHAR_LIMIT = 2000;
+export const RETRIEVE_LAYER_BUDGET = 1200;
+/** 单轮 system 硬预算（THATPERSON_SYSTEM_TOKEN_BUDGET 可调，默认 16000 token） */
+export const SYSTEM_TOKEN_BUDGET = envInt('THATPERSON_SYSTEM_TOKEN_BUDGET', 16000);
+/** 单轮 system 目标预算（THATPERSON_SYSTEM_TOKEN_TARGET 可调，默认 8000 token） */
+export const SYSTEM_TOKEN_TARGET = envInt('THATPERSON_SYSTEM_TOKEN_TARGET', 8000);
+/** summary 字符上限（THATPERSON_SUMMARY_CHAR_LIMIT 可调，默认 6000），超限二次折叠 */
+export const SUMMARY_CHAR_LIMIT = envInt('THATPERSON_SUMMARY_CHAR_LIMIT', 6000);
 /** 技能摘要层字符预算（第 4 期 D-3b；5 个出厂技能一行一条远小于此值） */
-export const SKILLS_LAYER_BUDGET = 800;
+export const SKILLS_LAYER_BUDGET = 1600;
 /** 单条技能摘要行上限 */
 const SKILL_LINE_BUDGET = 140;
 
@@ -54,8 +56,25 @@ export function loadEnv(): void {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool';
   content: string;
+  /** 工具回灌消息（role='tool'）对应的 tool_call_id（ReAct 循环使用） */
+  tool_call_id?: string;
+  /** 助手消息携带的结构化工具调用（ReAct 循环：下一轮请求必须回传，保证 role='tool' 有对应的 tool_calls） */
+  toolCalls?: ToolCall[];
+}
+
+/** 结构化工具调用（DeepSeek Function Calling 解析结果） */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/** chat() 返回：正文 + 可选的结构化工具调用 */
+export interface ChatResult {
+  content: string;
+  toolCalls?: ToolCall[];
 }
 
 export interface ChatOptions {
@@ -71,6 +90,8 @@ export interface ChatOptions {
   isMock?: boolean;
   /** 技能清单（注入 System 技能摘要层；缺省时按 listSkills() 动态扫描） */
   skills?: SkillInfo[];
+  /** 工具定义列表（Function Calling；缺省/空数组时行为与现状一致） */
+  tools?: ToolDef[];
 }
 
 /** 粗略 token 估算：中文≈1 token，其他字符≈0.35（用于预算断言与日志） */
@@ -79,6 +100,34 @@ export function estimateTokens(text: string): number {
   const cjk = (text.match(/[\u4e00-\u9fa5]/g) ?? []).length;
   const other = text.length - cjk;
   return Math.ceil(cjk + other * 0.35);
+}
+
+/**
+ * 检索语料段落化（第 5 期 D8/KS-6）：按空行切段；单段过长时按句子边界折成 ≤240 字符片段。
+ * 目的：长文本（日记/文章）按段落命中，避免整篇命中挤占 RETRIEVE_TOP_K。
+ */
+function corpusParagraphs(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of (text ?? '').split(/\n\s*\n/)) {
+    const block = raw.trim();
+    if (!block) continue;
+    if (block.length <= 240) {
+      out.push(block);
+      continue;
+    }
+    const pieces = block.split(/(?<=[。！？!?；;])\s*/).filter(Boolean);
+    let buf = '';
+    for (const piece of pieces) {
+      if (buf && (buf + piece).length > 240) {
+        out.push(buf);
+        buf = piece;
+      } else {
+        buf += piece;
+      }
+    }
+    if (buf) out.push(buf);
+  }
+  return out;
 }
 
 /** 截断到指定字符数（保留语义完整性） */
@@ -310,6 +359,7 @@ export function retrieveRelevant(
   }
   if (memories.importantDates) corpus.push({ source: 'timeline/important_dates.md', text: memories.importantDates });
   if (memories.patterns) corpus.push({ source: 'insights/patterns.md', text: memories.patterns });
+  if (memories.journal) corpus.push({ source: 'experiences/journal.md', text: memories.journal });
   for (const s of memories.recentSessions) corpus.push({ source: 'session_logs', text: s });
 
   // 检索源 = 本轮 + 最近 2 轮
@@ -320,11 +370,11 @@ export function retrieveRelevant(
   // 标签倒排索引：语料中 #标签 → 所在行
   const tagIndex = new Map<string, string[]>();
   for (const item of corpus) {
-    for (const line of item.text.split('\n')) {
-      const tags = line.match(/#[^\s`]+/g) ?? [];
+    for (const unit of corpusParagraphs(item.text)) {
+      const tags = unit.match(/#[^\s`]+/g) ?? [];
       for (const tag of tags) {
         const arr = tagIndex.get(tag) ?? [];
-        arr.push(`[${item.source}] ${line.trim()}`);
+        arr.push(`[${item.source}] ${unit}`);
         tagIndex.set(tag, arr);
       }
     }
@@ -349,10 +399,9 @@ export function retrieveRelevant(
   if (hits.length < RETRIEVE_TOP_K) {
     outer: for (const kw of keywords) {
       for (const item of corpus) {
-        for (const line of item.text.split('\n')) {
-          const t = line.trim();
-          if (t && t.includes(kw)) {
-            pushHit(`[${item.source}] ${t}`);
+        for (const unit of corpusParagraphs(item.text)) {
+          if (unit.includes(kw)) {
+            pushHit(`[${item.source}] ${unit}`);
             if (hits.length >= RETRIEVE_TOP_K) break outer;
           }
         }
@@ -381,6 +430,20 @@ export function buildSkillsSummary(skills: SkillInfo[] = listSkills()): string {
   return lines.join('\n');
 }
 
+/**
+ * 工具清单摘要（KS-19/双边界）：宿主静态生成，只列工具名/参数/一句话描述。
+ * 模型无法通过对话定义新工具；<工具清单> 与 <技能清单> 各自独立边界。
+ */
+export function buildToolSummary(tools: ToolDef[]): string {
+  const esc = (s: string): string => (s ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const lines = tools.map((t) => {
+    const params = t.params.map((p) => `${p.name}${p.required ? '' : '?'}`).join(',');
+    const desc = esc(t.description.replace(/\s+/g, ' ').trim().slice(0, 120));
+    return `${esc(t.name)}(${params})：${desc}`;
+  });
+  return lines.join('\n');
+}
+
 /** 取描述第一句（以 。！？ 结尾），保留人话可读性；过长则截断 */
 function firstSentence(text: string): string {
   const t = text.replace(/\s+/g, ' ').trim();
@@ -399,6 +462,7 @@ export function buildSystemPrompt(
   extraMemory = '',
   summary = '',
   skills: SkillInfo[] = listSkills(),
+  tools: ToolDef[] = [],
 ): string {
   const profileLayer = buildProfileLayer(memories.profile);
   const dateLayer = buildDateLayer(memories.importantDates);
@@ -408,8 +472,12 @@ export function buildSystemPrompt(
   const parts: string[] = [];
   const present = buildPresentBlock(clip(presentText, 1200));
   if (present) parts.push(present);
-  parts.push('你是「ThatPerson」——一位温暖、细腻、善于倾听的个人 AI 伴侣。');
+  parts.push('你是「ThatPerson」——一位温暖、细腻、善于倾听的个人管家。');
   parts.push('沟通风格温和真诚，像认识很久的挚友；不主动打探隐私，尊重用户的沉默。');
+  parts.push(
+    '当用户分享了具体内容（如日记、文章、长文本）时，先回应内容本身（共情、理解、总结要点），' +
+      '再回应「发来/分享」这个动作；避免只回应动作而不触及内容。',
+  );
   parts.push(
     '回复时只从 <检索命中> 中挑选与当前话题或情绪直接相关的记忆点融入，最多 1 个；' +
       '<memory> 中与当前话题无关的旧记忆忽略，不要提及。绝不机械罗列记忆，绝不全话题扫射。',
@@ -431,6 +499,15 @@ export function buildSystemPrompt(
   if (skillsLayer) {
     parts.push(`<技能清单>\n${clip(skillsLayer, SKILLS_LAYER_BUDGET)}\n</技能清单>`);
     parts.push('（技能清单仅为能力摘要，供回答「你会什么」；执行技能时才加载对应 SKILL.md，不在此展开原文。）');
+  }
+
+  // 工具清单层（KS-19/双边界）：宿主静态生成，仅列出可调用的真实工具
+  if (tools.length > 0) {
+    const toolLayer = buildToolSummary(tools);
+    if (toolLayer) {
+      parts.push(`<工具清单>\n${clip(toolLayer, 800)}\n</工具清单>`);
+      parts.push('（工具清单由系统静态维护，只能调用其中列出的工具；不要凭空发明或伪造新工具。）');
+    }
   }
 
   const memoryLayers: string[] = [];
@@ -470,22 +547,62 @@ export function today(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * 组装请求消息（SEC-11 边界）：system + 历史（含 role='tool' 的工具回灌）+ 用户消息。
+ * 工具结果只以独立 role='tool' 消息存在，永不并入 system 指令区。
+ */
+export function buildChatMessages(
+  system: string,
+  history: ChatMessage[],
+  userPrompt: string,
+): Array<{
+  role: string;
+  content: string;
+  tool_call_id?: string;
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+}> {
+  return [
+    { role: 'system', content: system },
+    ...(history ?? []).map((m) => {
+      if (m.role === 'tool') {
+        return { role: 'tool' as const, content: m.content, tool_call_id: m.tool_call_id ?? '' };
+      }
+      if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+        return {
+          role: 'assistant' as const,
+          content: m.content,
+          tool_calls: m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: tc.arguments },
+          })),
+        };
+      }
+      return { role: m.role, content: m.content };
+    }),
+    { role: 'user', content: userPrompt },
+  ];
+}
+
 /** 对话调用：Present + 分层记忆 + 历史 + 摘要 → DeepSeek；--mock 时不发起任何网络请求 */
 export async function chat(
   userPrompt: string,
   memories: LoadedMemories,
   options: ChatOptions = {},
-): Promise<string> {
-  const apiKey = process.env.AAGENTDS_API_KEY;
+): Promise<ChatResult> {
+  // KS-9（D11/ADR-5）：Key 同源——环境变量 > config.json.apiKey > 包目录 .env
+  const apiKey = resolveApiKey();
   if (!options.isMock && !apiKey) {
-    throw new Error('未找到 AAGENTDS_API_KEY，请检查项目根目录的 .env 文件');
+    throw new Error('未找到 API Key，请运行 thatperson setup 或 thatperson config set apiKey <Key>');
   }
   if (options.isMock) {
-    return `（离线演示，未调用 API）我在听～关于「${userPrompt}」，感觉你今天状态不错，可以多和我聊聊。`;
+    return {
+      content: `（离线演示，未调用 API）我在听～关于「${userPrompt}」，感觉你今天状态不错，可以多和我聊聊。`,
+    };
   }
 
   const relevant = retrieveRelevant(userPrompt, memories, options.recentUserTexts);
-  const system = buildSystemPrompt(memories, options.presentText, relevant, options.summary, options.skills);
+  const system = buildSystemPrompt(memories, options.presentText, relevant, options.summary, options.skills, options.tools);
   const sysTokens = estimateTokens(system);
   console.log(`[ThatPerson] system token ≈ ${sysTokens}（预算 ${SYSTEM_TOKEN_BUDGET}，目标 ${SYSTEM_TOKEN_TARGET}）`);
   if (sysTokens > SYSTEM_TOKEN_BUDGET) {
@@ -493,11 +610,39 @@ export async function chat(
   }
   // 模型唯一来源：config.model（默认 deepseek-v4-flash），不再硬编码请求模型（任务 1）
   const model = loadConfig().model || MODEL;
-  const messages = [
-    { role: 'system', content: system },
-    ...(options.history ?? []).map((m) => ({ role: m.role, content: m.content })),
-    { role: 'user', content: userPrompt },
-  ];
+  const messages = buildChatMessages(system, options.history ?? [], userPrompt);
+
+  const body: {
+    model: string;
+    messages: typeof messages;
+    stream: boolean;
+    tools?: unknown[];
+    tool_choice?: string;
+  } = { model, messages, stream: false };
+  if (options.tools && options.tools.length > 0) {
+    body.tools = options.tools.map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: {
+          type: 'object',
+          properties: Object.fromEntries(
+            t.params.map((p) => [
+              p.name,
+              {
+                type: p.type,
+                description: p.description ?? '',
+                ...(p.enum ? { enum: p.enum } : {}),
+              },
+            ]),
+          ),
+          required: t.params.filter((p) => p.required).map((p) => p.name),
+        },
+      },
+    }));
+    body.tool_choice = 'auto';
+  }
 
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: 'POST',
@@ -505,7 +650,7 @@ export async function chat(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, messages, stream: false }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
@@ -513,6 +658,22 @@ export async function chat(
     const detail = raw.slice(0, 500).replace(/sk-[A-Za-z0-9]+/g, 'sk-***');
     throw new Error(`API 请求失败（HTTP ${res.status}）：${detail}`);
   }
-  const data = (await res.json()) as { choices: { message: { content: string } }[] };
-  return data.choices[0]?.message?.content ?? '';
+  const data = (await res.json()) as {
+    choices: {
+      message: {
+        content?: string;
+        tool_calls?: Array<{ id?: string; function: { name: string; arguments?: string } }>;
+      };
+    }[];
+  };
+  const message = data.choices[0]?.message;
+  const content = message?.content ?? '';
+  const toolCalls = (message?.tool_calls ?? [])
+    .filter((tc) => tc.function?.name)
+    .map((tc) => ({
+      id: tc.id ?? `call_${tc.function.name}`,
+      name: tc.function.name,
+      arguments: tc.function.arguments ?? '{}',
+    }));
+  return toolCalls.length > 0 ? { content, toolCalls } : { content };
 }

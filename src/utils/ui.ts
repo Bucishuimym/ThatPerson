@@ -27,7 +27,7 @@ export const logger = {
 export function showBanner(version: string): void {
   const art = figlet.textSync('ThatPerson', { font: 'Small' });
   console.log(chalk.cyan(art));
-  console.log(chalk.gray(`  版本: v${version}  |  个人管理与陪伴 Agent\n`));
+  console.log(chalk.gray(`  版本: v${version}  |  个人管家\n`));
 }
 
 /** 状态卡片：boxen 圆角蓝边卡片（title + 键值对） */

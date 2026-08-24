@@ -176,10 +176,14 @@ function makeTags(text: string, type: ArchiveType): string[] {
   return tags;
 }
 
-/** 清理捕获的对象文本 */
+/** KS-2：占位词黑名单——命中视为无意义对象（不再产出「喜欢「事情」」式条目） */
+const PLACEHOLDER_OBJECTS = /(事情|东西|感觉|时候|样子|氛围|状态|想法|事物|事儿)/;
+
+/** 清理捕获的对象文本（KS-2：占位词命中视为无对象） */
 function cleanObject(raw: string): string {
   let obj = raw.replace(/^(的|了|呢|啊|吧|都|就|还|也)/, '').trim();
   obj = obj.replace(/[的了呢啊吧都就是]+$/, '');
+  if (PLACEHOLDER_OBJECTS.test(obj)) return '';
   return obj;
 }
 
@@ -262,18 +266,27 @@ function backtrackObject(text: string, matchIndex: number): string {
 /** 从用户文本提取偏好条目 */
 function extractPrefs(userText: string): PrefHit[] {
   const hits: PrefHit[] = [];
-  const seen = new Set<string>();
+  const seenByPos = new Set<string>();
+  const seenBySentence = new Set<string>();
   for (const rule of PREF_RULES) {
     rule.re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = rule.re.exec(userText)) !== null) {
       const pos = m.index;
-      const key = rule.polarity + '@' + pos;
-      if (seen.has(key)) {
+      const posKey = rule.polarity + '@' + pos;
+      if (seenByPos.has(posKey)) {
         rule.re.lastIndex = pos + 1;
         continue;
       }
-      seen.add(key);
+      seenByPos.add(posKey);
+      // KS-1：同句同极性只保留第一次命中（「最喜欢…做着自己喜欢的事情」只产 1 条）
+      const [sentStart, sentEnd] = sentenceBounds(userText, pos);
+      const sentence = userText.slice(sentStart, sentEnd);
+      const sentenceKey = rule.polarity + '|' + sentence;
+      if (seenBySentence.has(sentenceKey)) {
+        rule.re.lastIndex = pos + 1;
+        continue;
+      }
       // P0 否定前置：正向命中前紧邻否定/不确定词时跳过，只保留负向归档
       if (rule.polarity === 'pos' && NEG_BEFORE_LIKE.test(userText.slice(Math.max(0, pos - 6), pos))) {
         rule.re.lastIndex = pos + 1;
@@ -281,8 +294,6 @@ function extractPrefs(userText: string): PrefHit[] {
       }
       const object = cleanObject(m[1] || '');
       // P0 疑问句过滤：对象或所在句子含 wh-词/疑问语气词，或句子以问号结尾时跳过
-      const [sentStart, sentEnd] = sentenceBounds(userText, pos);
-      const sentence = userText.slice(sentStart, sentEnd);
       const endsWithQuestionMark = /[？?]/.test(userText[sentEnd] ?? '');
       if (QUESTION_MARKS.test(object) || QUESTION_MARKS.test(sentence) || endsWithQuestionMark) {
         rule.re.lastIndex = pos + 1;
@@ -293,7 +304,9 @@ function extractPrefs(userText: string): PrefHit[] {
         rule.re.lastIndex = m.index + Math.max(m[0].length, 1);
         continue;
       }
-      const target = object || backtrackObject(userText, m.index);
+      let target = object || backtrackObject(userText, m.index);
+      // KS-2：负向回溯对象同样过滤占位词（不再产出「喜欢「事情」」）
+      if (PLACEHOLDER_OBJECTS.test(target)) target = '';
       const polarityText = rule.polarity === 'pos' ? '喜欢' : '不喜欢';
       // P0 不确定性降级：同句含「不确定/也许/可能/不一定」等时置信度降为「中」并标注待确认
       const uncertain = UNCERTAIN_WORDS.test(sentence);
@@ -312,6 +325,7 @@ function extractPrefs(userText: string): PrefHit[] {
         tags: makeTags(dialog + object, '偏好'),
       };
       hits.push({ entry, polarity: rule.polarity, object });
+      seenBySentence.add(sentenceKey);
       rule.re.lastIndex = m.index + Math.max(m[0].length, 1);
     }
   }
@@ -387,10 +401,16 @@ function extractVerbPhrase(beforeFeel: string): string {
   return phrase.length >= 2 ? phrase : '';
 }
 
+/** KS-3：否定/取舍式结构——「没做/不想做/喜不喜欢」等句子不产经历条目 */
+const NEGATED_EXPERIENCE =
+  /(没(?:有)?(?:去|看|吃|喝|听|玩|做|写|读|买|试|学|练|打|爬|跑|骑|游|唱|逛|上|参加|体验|练习|准备|学会|坚持|错过|完成|出差|开会)|不(?:去|看|吃|喝|听|玩|做|写|读|买|试|学|练|打|爬|跑|骑|游|唱|逛|上|参加|体验|练习|准备|会|想|愿意|打算|敢|要)|(?:喜不喜|好不好|想不想|要不要|去不去|看不看|吃不吃|听不听|玩不玩|做不做|买不买|读不读|写不写|试不试|学不学|打不打|跑不跑)|别(?:去|看|吃|喝|听|玩|做|写|读|买|试|学|练|打|爬|跑|骑|游|唱|逛|上|参加|体验|练习|准备)|不要|从未|从没|还没|未曾|没有)/;
+
 /** 从用户文本提取经历条目（行为动词 + 感受词，3c 动宾短语版） */
 function extractExperiences(userText: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
   for (const sentence of splitSentences(userText)) {
+    // KS-3：句子含不确定词或否定/取舍式结构时跳过该句，不产经历条目
+    if (UNCERTAIN_WORDS.test(sentence) || NEGATED_EXPERIENCE.test(sentence)) continue;
     const feel = sentence.match(FEEL_WORDS);
     if (!feel) continue;
     const feelIndex = feel.index ?? 0;
@@ -543,6 +563,33 @@ export function extractArchives(userText: string, assistantText: string): Archiv
   entries.push(...extractDates(text));
   entries.push(...extractIdentities(text));
   return dedupe(entries);
+}
+
+// ===== 长文本内容模式（KS-4） =====
+
+/**
+ * 长文本内容感知归档通道（KS-4）：
+ * - ≤200 字：直接走规则版 extractArchives；
+ * - >200 字：先走规则版；若产出 0 条，则把长文本整体作为 1 条「经历」归档——
+ *   insight 概括开头内容、dialog 截取开头 ~40 字、confidence=中、tags=#内容 #长文本。
+ */
+export function extractContentModeArchives(userText: string): ArchiveEntry[] {
+  const text = (userText || '').trim();
+  if (text.length === 0) return [];
+  const entries = extractArchives(text, '');
+  if (text.length > 200 && entries.length === 0) {
+    const head = text.slice(0, 40);
+    return [
+      {
+        type: '经历',
+        dialog: head,
+        insight: '用户分享了一段长文本，开头内容：「' + head + '…」。',
+        confidence: '中',
+        tags: ['#内容', '#长文本'],
+      },
+    ];
+  }
+  return entries;
 }
 
 // ===== 每日摘要 =====

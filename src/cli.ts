@@ -17,7 +17,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { chat, loadEnv, sectionOf, today, foldSummary, SYSTEM_TOKEN_BUDGET, type ChatMessage } from './chat';
-import { loadPresent } from './present';
+import { loadPresent, presentInit, presentShowText } from './present';
 import { createMemoryStore, countArchiveEntries, compactMemoryFile } from './memory/store';
 import {
   type ArchiveEntry,
@@ -25,8 +25,30 @@ import {
   type MemoryStore,
   SECTION_FILES,
 } from './memory/types';
-import { extractArchives, buildSessionSummary, detectCrossTurnPatterns } from './parser/archive';
-import { ensureConfigDir, loadConfig, memoryRoot, resolveHistoryDir, thatPersonHome, getConfigValue, setConfigValue, CONFIG_KEY_WHITELIST, listDisabledSkills, disableSkill, enableSkill, type ConfigKey } from './config';
+import { extractArchives, buildSessionSummary, detectCrossTurnPatterns, extractContentModeArchives } from './parser/archive';
+import {
+  ensureConfigDir,
+  loadConfig,
+  memoryRoot,
+  resolveHistoryDir,
+  thatPersonHome,
+  getConfigValue,
+  setConfigValue,
+  CONFIG_KEY_WHITELIST,
+  listDisabledSkills,
+  disableSkill,
+  enableSkill,
+  hasApiKey,
+  resolveApiKey,
+  maskApiKey,
+  isConfigured,
+  resetConfig,
+  type ConfigKey,
+} from './config';
+import { runSetupWizard } from './setup';
+import { runAgentLoop } from './agent/loop';
+import { listTools } from './tools/registry';
+import { registerBuiltins } from './tools/builtin';
 import { listSkills, matchSkill, type SkillInfo } from './skill';
 import { logger, showBanner, showStatusCard } from './utils/ui';
 import { checkForUpdates, readCurrentVersion, shouldSkipUpdateCheck } from './utils/update-check';
@@ -130,13 +152,19 @@ export function formatHelp(): string {
     '全局指令（thatperson <子命令>）：',
     '  status      显示系统状态卡片（版本/模型/记忆/技能/Token 预算/目录）',
     '  update      手动检查更新（绕过 12h 缓存；开发/本地路径仍跳过）',
+    '  setup       首次配置向导（输入 API Key 与模型，写回 config.json）',
+    '  wizard      setup 的别名',
+    '  reset       重置配置（仅保留 apiKey 与 model；--keep-present 保留 present 覆盖）',
+    '  present init  生成出厂人格模板到主目录 present/（不覆盖既有文件）',
+    '  present show  查看当前生效人格',
+    '  tools list    列出已注册工具（read/write/danger）',
     '  memory search <关键词>  在记忆中搜索关键词',
     '  memory stats            显示记忆统计（分 section 条目数）',
     '  memory clean            对归档文件执行压缩清理',
     '  session list            列出历史会话（session_logs）',
     '  session clear           清空当前内存会话',
-    '  config get [key]        查看配置（model / disabledSkills）',
-    '  config set <key> <val>  修改配置',
+    '  config get [key]        查看配置（model / disabledSkills / apiKey，apiKey 掩码回显）',
+    '  config set <key> <val>  修改配置（apiKey 掩码回显）',
     '  skills list             列出已安装技能与启用状态',
     '  skills enable|disable <名称>  启用/禁用技能',
     '  help                    显示本帮助',
@@ -380,12 +408,17 @@ async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): P
       injected += `\n[指令执行结果]\n${extra.toolResult}\n[/指令执行结果]`;
     }
     const prompt = injected ? `${line}\n${injected}` : line;
-    const reply = await chat(prompt, memories, {
-      presentText: ctx.present,
+    // KS-20（ReAct）：普通消息走 loop.ts——解析器/执行器/回灌器循环，工具调用不直接显示给用户
+    const { reply } = await runAgentLoop({
+      userPrompt: prompt,
+      memories,
+      isMock: ctx.isMock,
+      present: ctx.present,
       history: ctx.session.history,
       summary: ctx.session.summary,
       recentUserTexts: ctx.session.recentUserTexts.slice(-RECENT_WINDOW),
-      isMock: ctx.isMock,
+      skills: ctx.skills,
+      tools: listTools(),
     });
     console.log(`ThatPerson：${reply}\n`);
 
@@ -404,6 +437,14 @@ async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): P
     const llm = await llmExtractArchivesSafe(line, reply, ctx.isMock);
     if (llm && llm.length > 0) {
       archives = await mergeArchivesSafe(archives, llm);
+    }
+    // KS-4（D7）：长文本内容模式——>200 字进入全文分析；规则/LLM 均无产出时走内容通道归档 1 条
+    const contentMode = line.length > 200;
+    if (contentMode) {
+      console.log('[ThatPerson] 内容模式：检测到长文本，按全文分析归档');
+    }
+    if (contentMode && archives.length === 0) {
+      archives = extractContentModeArchives(line);
     }
     // 跨轮模式（3c）：窗口内同主题跨 ≥2 轮才记录，单条消息不产模式
     const crossPatterns = detectCrossTurnPatterns(ctx.session.recentUserTexts);
@@ -491,6 +532,7 @@ async function runStatus(): Promise<void> {
   showStatusCard('📊 系统状态', {
     版本: readCurrentVersion(),
     模型: loadConfig().model,
+    'API Key': hasApiKey() ? maskApiKey(resolveApiKey() ?? '') : '未配置',
     记忆条目: `${memoryTotal} 条`,
     技能数量: `${skills.length} 个`,
     'Token 预算': `${SYSTEM_TOKEN_BUDGET} / 轮`,
@@ -602,7 +644,15 @@ export function configGetText(key?: string): string {
   const { configPath } = ensureConfigDir();
   if (!key) {
     const cfg = loadConfig();
-    return `配置文件：${configPath}\n模型：${cfg.model}\n禁用技能：${cfg.disabledSkills?.join('、') || '（无）'}`;
+    const lines = [`配置文件：${configPath}`, `模型：${cfg.model}`];
+    lines.push(cfg.apiKey ? `API Key：${maskApiKey(cfg.apiKey)}` : 'API Key：未设置');
+    lines.push(`禁用技能：${cfg.disabledSkills?.join('、') || '（无）'}`);
+    lines.push(`已配置：${isConfigured() ? '是' : '否'}`);
+    return lines.join('\n');
+  }
+  if (key === 'apiKey') {
+    const value = loadConfig().apiKey;
+    return value ? maskApiKey(value) : '未设置 API Key';
   }
   const value = getConfigValue(key as ConfigKey);
   if (value === undefined) return `未设置配置键：${key}（可用：${CONFIG_KEY_WHITELIST.join('、')}）`;
@@ -613,7 +663,8 @@ export function configGetText(key?: string): string {
 export function configSetText(key: string, value: string): string {
   if (!key || !value) return '用法：thatperson config set <key> <value>';
   const result = setConfigValue(key, value);
-  return result.ok ? `已写入配置：${key}` : result.error;
+  if (!result.ok) return result.error;
+  return key === 'apiKey' ? `已写入配置：apiKey（${maskApiKey(value)}）` : `已写入配置：${key}`;
 }
 
 /** 技能列表（S-03 skills list）：名称 / 描述摘要 / 启用状态 */
@@ -662,6 +713,76 @@ export async function runGlobalCommand(
     case 'help':
       console.log(formatHelp());
       return 0;
+    case 'setup':
+    case 'wizard': {
+      const result = await runSetupWizard();
+      if (!result.ok) {
+        logger.warn(result.error ?? '配置向导未完成');
+      }
+      return 0;
+    }
+    case 'reset': {
+      const keepPresent = args.includes('--keep-present');
+      const result = resetConfig({ keepPresent });
+      if (!result.ok) {
+        logger.error(result.error);
+        return 1;
+      }
+      if (!keepPresent) {
+        const homePresent = path.join(thatPersonHome(), 'present');
+        const removed: string[] = [];
+        try {
+          for (const file of fs.readdirSync(homePresent)) {
+            if (file.endsWith('.md')) {
+              fs.rmSync(path.join(homePresent, file));
+              removed.push(file);
+            }
+          }
+        } catch {
+          // 目录不存在/不可读：跳过
+        }
+        if (removed.length > 0) {
+          console.log(`已清除 present 覆盖：${removed.join('、')}`);
+        }
+      }
+      console.log('已重置配置（仅保留 apiKey 与 model）。对话内 /reset 仅清会话，语义不同。');
+      return 0;
+    }
+    case 'present': {
+      const sub = (args[0] ?? '').toLowerCase();
+      if (sub === 'init') {
+        const { written, skipped } = presentInit(thatPersonHome());
+        if (written.length > 0) console.log(`已生成人格模板：${written.join('、')}`);
+        if (skipped.length > 0) console.log(`已存在未覆盖：${skipped.join('、')}`);
+        if (written.length === 0 && skipped.length === 0) console.log('（无可生成的模板）');
+      } else if (sub === 'show') {
+        const text = presentShowText();
+        console.log(text.trim() ? text : '（当前无生效人格，可运行 thatperson present init 生成模板）');
+      } else {
+        logger.warn('用法：thatperson present init | show');
+        return 1;
+      }
+      return 0;
+    }
+    case 'tools': {
+      const sub = (args[0] ?? '').toLowerCase();
+      if (sub === 'list') {
+        const tools = listTools();
+        if (tools.length === 0) {
+          console.log('（无已注册工具）');
+        } else {
+          const lines = tools.map((t) => {
+            const params = t.params.map((p) => `${p.name}${p.required ? '' : '?'}`).join(',');
+            return `  ${t.name}（${t.policy}，${params}）：${t.description.slice(0, 60)}`;
+          });
+          console.log(`已注册工具（${tools.length} 个）：\n${lines.join('\n')}`);
+        }
+      } else {
+        logger.warn('用法：thatperson tools list');
+        return 1;
+      }
+      return 0;
+    }
     case 'memory': {
       const sub = (args[0] ?? '').toLowerCase();
       if (sub === 'stats') {
@@ -721,14 +842,16 @@ export async function runGlobalCommand(
 // ===== 入口（S-01）=====
 
 function defaultProjectSkillsDirs(): string[] {
-  return [
-    path.resolve(process.cwd(), '.claude', 'skills'),
-    path.resolve(__dirname, '..', '..', 'skills'), // 出厂技能库（包内 skills/）
-  ];
+  // KS-12：移除 .claude/skills 概念；出厂技能库（包内 skills/）由 skill.ts 级联兜底
+  return [path.resolve(__dirname, '..', '..', 'skills')];
 }
 
 async function main(): Promise<void> {
   loadEnv();
+  // KS-7（D9）：目录生成时机上移——任何一次调用（含 --version/--help）都保证 ~/.thatperson/ 存在
+  ensureConfigDir();
+  // KS-17：工具注册表初始化（danger 工具默认不注册）
+  registerBuiltins();
   const args = parseArgs(process.argv);
 
   // Bug 1 修复：--version / -V 输出版本后退出，不再进入对话（S-01）
@@ -747,7 +870,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  ensureConfigDir();
   const config = loadConfig();
   const store = createMemoryStore(memoryRoot());
   store.ensureStructure();
@@ -758,6 +880,16 @@ async function main(): Promise<void> {
   if (args.command) {
     const code = await runGlobalCommand(args.command, args.commandArgs, { isMock: args.isMock, projectSkillsDirs });
     process.exit(code);
+  }
+
+  // KS-8（D11）：无 Key 且未 configured → 进入对话前自动引导 setup；非交互（管道/输入文件）不弹
+  if (!args.isMock && !args.inputFile && process.stdin.isTTY && !hasApiKey() && !isConfigured()) {
+    const setupResult = await runSetupWizard();
+    if (!setupResult.ok) {
+      logger.warn(setupResult.error ?? '配置向导未完成，可稍后运行 thatperson setup');
+    } else {
+      logger.success('首次配置完成');
+    }
   }
 
   // 更新检查：启动时异步调用，静默失败；--mock 不发网络（S-07/S-08/SEC-7）
@@ -786,6 +918,19 @@ async function runDialog(ctx: DialogContext): Promise<void> {
   console.log('[ThatPerson] 持续对话模式已开启' + (ctx.isMock ? '（离线演示，不调用 API）' : ''));
   console.log(`[ThatPerson] 全局目录：${ctx.home} ｜ 默认模型：${ctx.model}`);
   console.log(`[ThatPerson] 记忆目录：${resolveHistoryDir()}`);
+  // KS-13（D12）：主目录 present/ 无任何 .md 时提醒初始化
+  try {
+    const homePresent = path.join(ctx.home, 'present');
+    const hasUserPresent =
+      fs.existsSync(homePresent) && fs.readdirSync(homePresent).some((f) => f.endsWith('.md'));
+    if (!hasUserPresent) {
+      console.log(
+        '[ThatPerson] 当前使用出厂人格。可运行 thatperson present init 生成模板，或直接告诉我你的偏好、称呼与定位。',
+      );
+    }
+  } catch {
+    // 目录不可读：忽略
+  }
   if (ctx.skills.length) {
     console.log(
       `[ThatPerson] 已发现 Skill：${ctx.skills.map((s) => s.name).join(' / ')}（输入 /<名称> 直接调用，命中关键词自动触发）`,

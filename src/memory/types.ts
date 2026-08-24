@@ -65,6 +65,8 @@ export interface LoadedMemories {
   importantDates: string | null;
   /** 长期行为模式文件内容，无则 null */
   patterns: string | null;
+  /** 经历日志文件内容（experiences/journal.md），无则 null（第 5 期 D8：长文本/日记进入检索语料） */
+  journal?: string | null;
   /** 最近 7 天的会话摘要内容，按日期从新到旧 */
   recentSessions: string[];
 }

@@ -1,17 +1,17 @@
 /**
- * Present 元认知系统（第三版提示词 · 二/六）
- * Present = Agent 的「出厂设置」（我是谁 / 我的风格 / 我的准则 / 我的输出习惯）
- * 用户级 ~/.thatperson/present/ 为全局人格基线；项目 present/ 可覆盖同名文件；
- * history/（真实长期记忆）始终在项目目录下，不入用户目录。
+ * Present 元认知系统（第三版提示词 · 六；第 5 期批次一：主目录/随身目录级联）
+ * Present = Agent 的「出厂设置」（我是谁 / 我的风格 / 我的准则 / 我的输出习惯 / 我的能力清单）。
+ * 级联：主目录 ~/.thatperson/present/ 为基线 → 随身目录 <cwd>/.thatperson/present/ 覆盖同名文件 → 包内出厂补齐；
+ * history/（真实长期记忆）所在目录由 config.memoryRoot 决定，不在此处。
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureConfigDir, isProjectMode } from './config';
+import { ensureConfigDir, localThatPersonDir } from './config';
 
-/** 项目 present/ 目录（相对项目根） */
+/** present/ 目录名（相对主目录/随身目录） */
 const PRESENT_DIR = 'present';
 
-/** 包内出厂 present/（dist/src 上溯 3 级到包根；发布后 = node_modules/@nineteenfolk/thatperson/present） */
+/** 包内出厂 present/（dist/src 上溯 2 级到包根；发布后 = node_modules/@nineteenfolk/thatperson/present） */
 const PACKAGE_PRESENT_DIR = path.join(__dirname, '..', '..', 'present');
 
 /** 收集目录下全部 .md 文件内容：文件名 -> 路径 */
@@ -27,18 +27,19 @@ function collectDirFiles(dir: string, target: Map<string, string>): void {
   }
 }
 
-/** 读取 present/ 内容：用户级基线 + 项目级覆盖，按文件名排序拼接；目录缺失返回空串 */
+/** 读取 present/ 内容：主目录基线 + 随身目录覆盖，按文件名排序拼接；目录缺失返回空串 */
 export function loadPresent(rootDir: string = process.cwd()): string {
   const { home } = ensureConfigDir();
   const files = new Map<string, string>();
-  // 用户级 ~/.thatperson/present/（全局基线）
-  collectDirFiles(path.join(home, 'present'), files);
-  // 项目 present/（同名覆盖用户级；独有文件保留；仅项目模式生效）
-  if (isProjectMode(rootDir)) {
-    collectDirFiles(path.resolve(rootDir, PRESENT_DIR), files);
+  // 主目录 ~/.thatperson/present/（全局基线）
+  collectDirFiles(path.join(home, PRESENT_DIR), files);
+  // 随身目录 <cwd>/.thatperson/present/（同名覆盖主目录；独有文件保留）
+  const local = localThatPersonDir(rootDir);
+  if (local) {
+    collectDirFiles(path.join(local, PRESENT_DIR), files);
   }
 
-  // 包内出厂兑底：用户级/项目级缺失的文件名用出厂人格补齐（同名优先用户/项目，不覆盖）
+  // 包内出厂兑底：主目录/随身目录缺失的文件名用出厂人格补齐（同名优先主/随身，不覆盖）
   try {
     const packageFiles = fs.readdirSync(PACKAGE_PRESENT_DIR).filter((f) => f.endsWith('.md'));
     for (const file of packageFiles) {
@@ -57,6 +58,39 @@ export function loadPresent(rootDir: string = process.cwd()): string {
     }
   }
   return parts.join('\n\n');
+}
+
+/** 将包内出厂 present/*.md 模板复制到目标 present 目录（已存在不覆盖） */
+export function presentInit(targetHome: string): { written: string[]; skipped: string[] } {
+  const targetDir = path.join(targetHome, PRESENT_DIR);
+  fs.mkdirSync(targetDir, { recursive: true });
+  const written: string[] = [];
+  const skipped: string[] = [];
+  let packageFiles: string[];
+  try {
+    packageFiles = fs.readdirSync(PACKAGE_PRESENT_DIR).filter((f) => f.endsWith('.md'));
+  } catch {
+    return { written, skipped };
+  }
+  for (const file of packageFiles.sort()) {
+    const target = path.join(targetDir, file);
+    if (fs.existsSync(target)) {
+      skipped.push(file);
+      continue;
+    }
+    try {
+      fs.copyFileSync(path.join(PACKAGE_PRESENT_DIR, file), target);
+      written.push(file);
+    } catch {
+      skipped.push(file);
+    }
+  }
+  return { written, skipped };
+}
+
+/** 当前生效人格全文（等效 loadPresent()，供 status/show 等使用） */
+export function presentShowText(): string {
+  return loadPresent();
 }
 
 /** 将 Present 内容组织为 System 消息（带边界标签，防注入） */

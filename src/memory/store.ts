@@ -340,8 +340,9 @@ export function createMemoryStore(rootDir?: string): MemoryStore {
         path.join(historyDir, 'timeline', 'important_dates.md'),
       );
       const patterns = readIfExists(path.join(historyDir, 'insights', 'patterns.md'));
+      const journal = readIfExists(path.join(historyDir, 'experiences', 'journal.md'));
       const recentSessions = await loadRecentSessions(historyDir);
-      return { profile, importantDates, patterns, recentSessions };
+      return { profile, importantDates, patterns, journal, recentSessions };
     },
 
     appendArchive(section: MemorySection, entry: ArchiveEntry): void {

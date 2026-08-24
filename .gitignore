@@ -32,3 +32,6 @@ venv/
 .claude/
 .codex/
 .agents/
+
+# 项目本地记忆（第 5 期：记忆统一落主目录，项目 history/ 不再入版本库）
+history/

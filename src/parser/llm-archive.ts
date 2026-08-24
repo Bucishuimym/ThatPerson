@@ -4,8 +4,9 @@
  * 与规则版关系（KeySpecs S-13/S-14）：extractArchives 永为兜底，本模块为增强。
  * - 默认关闭：仅当环境变量 THATPERSON_LLM_ARCHIVE === 'true' 且非 mock 时才真正调用 LLM；
  *   否则一律返回 []（离线安全，不发起网络请求、不读 Key）。
- * - 端点复用 src/chat.ts 的 BASE_URL / MODEL（白名单端点）；Key 从 .env 读取（沿用
- *   chat.ts 的 loadEnv 语义），不硬编码、不落日志、不进 System。
+ * - 端点复用 src/chat.ts 的 BASE_URL / MODEL（白名单端点）；Key 读独立
+ *   AAGENTDS_ARCHIVE_API_KEY（第 5 期 KS-22：禁止复用主 Key AAGENTDS_API_KEY），
+ *   不硬编码、不落日志、不进 System。
  * - LLM 输出必须为可解析 JSON 数组，解析/校验失败一律降级返回 []（规则版兜底），
  *   绝不抛错阻塞主流程。不新增运行时依赖。
  *
@@ -17,7 +18,7 @@ import type { ArchiveEntry, ArchiveType, Confidence } from '../memory/types';
 export interface LlmArchiveOptions {
   /** 离线演示模式：true 时不发起网络请求、不读 Key */
   isMock?: boolean;
-  /** 显式传入 Key（优先级最高；默认按 AAGENTDS_ARCHIVE_API_KEY > AAGENTDS_API_KEY 从 .env 读取） */
+  /** 显式传入 Key（优先级最高；默认按 AAGENTDS_ARCHIVE_API_KEY 从 .env 读取，不复用主 Key） */
   apiKey?: string;
   /** 模型覆盖（默认复用 chat.ts 的 MODEL） */
   model?: string;
@@ -76,7 +77,11 @@ function buildArchivePrompt(userText: string, assistantText: string): Array<{ ro
         '你是 ThatPerson 的记忆归档提取器。请根据用户本轮对话提取值得长期记忆的条目，只输出一个 JSON 数组（不要 Markdown，不要多余解释）。\n' +
         '字段要求：\n' +
         schema +
-        '\n规则：只提取用户明确说出或可合理推断的内容，不得编造记忆；用户表达不确定时 confidence 用「中」；无法提取时输出 []。',
+        '\n硬性规则：\n' +
+        '1. insight 必须是对 dialog 的语义概括（用自己的话总结），禁止原样截取用户原话片段；\n' +
+        '2. 同一条 dialog 不得产出多条同类型条目（同类型只保留一条）；\n' +
+        '3. 用户表达不确定（不确定/也许/可能/说不定/大概/或许 等）时 confidence 一律用「中」，且不得同时产出「偏好」与「经历」两条；\n' +
+        '4. 只提取用户明确说出或可合理推断的内容，不得编造记忆；无法提取时输出 []。',
     },
     {
       role: 'user',
@@ -99,7 +104,7 @@ export async function llmExtractArchives(
   if (process.env.THATPERSON_LLM_ARCHIVE !== 'true') return [];
   // 沿用 chat.ts 的 loadEnv 语义：加载项目根 .env，不覆盖系统环境变量（幂等，安全）
   loadEnv();
-  const apiKey = opts?.apiKey || process.env.AAGENTDS_ARCHIVE_API_KEY || process.env.AAGENTDS_API_KEY;
+  const apiKey = opts?.apiKey || process.env.AAGENTDS_ARCHIVE_API_KEY;
   if (!apiKey) return [];
   try {
     const res = await fetch(`${BASE_URL}/chat/completions`, {

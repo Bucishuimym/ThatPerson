@@ -147,3 +147,25 @@ test('经历提取：否定感受不被误判为正向', () => {
   assert.ok(exp, '应提取经历条目');
   assert.match(exp!.insight, /不喜欢/, '感受应为「不喜欢」，实际：' + exp!.insight);
 });
+
+// ===== KS-2 占位词黑名单（2026-08-22 · 第 5 期批次一） =====
+
+test('占位词黑名单：「我喜欢做事情」「我喜欢这种感觉」不产偏好对象为「事情/感觉」的条目', () => {
+  for (const input of ['我喜欢做事情', '我喜欢这种感觉']) {
+    const prefs = extractArchives(input, '').filter((a) => a.type === '偏好');
+    assert.equal(
+      prefs.length,
+      0,
+      `占位词应视为无对象、正向无对象跳过，输入：${input}，实际：${JSON.stringify(prefs.map((p) => p.insight))}`,
+    );
+  }
+  // 负向回溯对象同样过滤占位词（KS-2）：不得把「做事情」当对象
+  const neg = extractArchives('我不太喜欢做事情，还是更喜欢看书', '');
+  const negPrefs = neg.filter((a) => a.type === '偏好');
+  for (const p of negPrefs) {
+    assert.ok(
+      !p.insight.includes('「事情」') && !p.insight.includes('「做事情」'),
+      `不得把「做事情」作为偏好对象，实际：${p.insight}`,
+    );
+  }
+});

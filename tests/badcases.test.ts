@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { extractArchives, detectCrossTurnPatterns } from '../src/parser/archive';
+import { extractArchives, extractContentModeArchives, detectCrossTurnPatterns } from '../src/parser/archive';
 import {
   buildSystemPrompt,
   estimateTokens,
@@ -165,8 +165,8 @@ test('BC-5 三个月记忆规模下 System Prompt 长度有上限（≤6000 toke
     tokens <= SYSTEM_TOKEN_BUDGET,
     `System Prompt 估算 token 应 ≤${SYSTEM_TOKEN_BUDGET}（字符数 ${prompt.length}，估算 ${tokens} token）`,
   );
-  // 保守的字符级上限：6000 token ≈ 9000 字符（按 1.5 字符/token），再留 30% 余量
-  assert.ok(prompt.length <= 12000, `字符级保险上限 12000 字符，实际 ${prompt.length} 字符`);
+  // 保守的字符级上限：按预算 2 字符/token 估算（与 token 预算同源，可配置）
+  assert.ok(prompt.length <= SYSTEM_TOKEN_BUDGET * 2, `字符级保险上限 ${SYSTEM_TOKEN_BUDGET * 2} 字符，实际 ${prompt.length} 字符`);
 });
 
 // ===== BC-6 =====
@@ -242,4 +242,74 @@ test('BC-9 不确定性「我都不确定我喜不喜欢上课」无双极性、
     assert.notEqual(p.confidence, '高', `不确定表述不得标「高」，实际：${p.insight}（${p.confidence}）`);
     assert.ok(['中', '低'].includes(p.confidence), `不确定表述应降级为「中/低」，实际：${p.confidence}`);
   }
+});
+
+// ===== BC-10 =====
+
+test('BC-10 同句多锚点单条目：「最喜欢…做着自己喜欢的事情」只产 1 条偏好', () => {
+  const archives = extractArchives('最喜欢的就是一个人坐在窗户边上吹着风做着自己喜欢的事情', '');
+  const prefs = archives.filter((a) => a.type === '偏好');
+  assert.equal(
+    prefs.length,
+    1,
+    `同句同极性应只保留第一次命中，实际：${JSON.stringify(prefs.map((p) => p.insight))}`,
+  );
+  for (const p of prefs) {
+    assert.ok(!p.insight.includes('「事情」'), `不得产出对象为「事情」的偏好，实际：${p.insight}`);
+  }
+});
+
+// ===== BC-11 =====
+
+test('BC-11 不确定不产经历：「不确定我到底喜不喜欢看书」无经历条目、无「感受：不喜欢」过度推断', () => {
+  const archives = extractArchives('不确定我到底喜不喜欢看书', '');
+  const exps = archives.filter((a) => a.type === '经历');
+  assert.equal(
+    exps.length,
+    0,
+    `不确定表述不得产经历条目，实际：${JSON.stringify(archives.map((a) => `${a.type}|${a.insight}`))}`,
+  );
+  for (const a of archives) {
+    assert.ok(
+      !(a.insight + a.dialog).includes('感受：不喜欢'),
+      `不得出现「感受：不喜欢」式过度推断，实际：${a.insight}`,
+    );
+  }
+  // 否定动作句同样不产经历（KS-3 否定结构闸）
+  const negArchives = extractArchives('我今天没去看电影', '');
+  assert.equal(
+    negArchives.filter((a) => a.type === '经历').length,
+    0,
+    `否定动作句不得产经历条目，实际：${JSON.stringify(negArchives.map((a) => `${a.type}|${a.insight}`))}`,
+  );
+});
+
+// ===== BC-12 =====
+
+test('BC-12 长文本内容归档：>200 字无感受词日记产出 ≥1 条经历', () => {
+  const longText =
+    '今天天气晴朗，我沿着河边走了很久，路边的树叶都黄了。下午去书店待了一会儿，挑了几本书，' +
+    '付钱的时候发现钱包忘带了，只好又跑回家一趟。回来的时候路过菜市场，顺便买了些菜。' +
+    '晚上做了番茄炒蛋和青菜，味道还可以。吃完饭收拾了屋子，把桌子擦了一遍，地板也拖了。' +
+    '九点多的时候泡了杯茶，坐在窗边看了一会儿夜景，外面的灯亮着，街道很安静。' +
+    '回来后洗了澡，把脏衣服放进洗衣机，又给阳台的花浇了水。临睡前翻了一会儿书架上的旧相册，' +
+    '照片都有些泛黄了。窗外月亮很圆，远处偶尔传来几声狗叫。这一天过得很平淡，节奏刚刚好。';
+  assert.ok(longText.length > 200, `前置条件：测试文本应 >200 字，实际 ${longText.length}`);
+  assert.equal(
+    extractArchives(longText, '').length,
+    0,
+    '前置条件：无感受词的日记文本走规则版应产出 0 条，否则内容模式兜底不生效',
+  );
+  const archives = extractContentModeArchives(longText);
+  const exps = archives.filter((a) => a.type === '经历');
+  assert.ok(
+    exps.length >= 1,
+    `长文本内容模式应产出 ≥1 条经历，实际：${JSON.stringify(archives.map((a) => `${a.type}|${a.insight}`))}`,
+  );
+  const fallback = exps[0];
+  assert.equal(fallback.confidence, '中', '内容模式兜底置信度应为「中」');
+  assert.ok(fallback.tags.includes('#内容'), '内容模式兜底应打 #内容 标签');
+  assert.ok(fallback.tags.includes('#长文本'), '内容模式兜底应打 #长文本 标签');
+  assert.ok(longText.startsWith(fallback.dialog), 'dialog 应截取长文本开头');
+  assert.ok(fallback.insight.length > 0, 'insight 应概括长文本开头内容');
 });

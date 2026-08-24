@@ -20,10 +20,13 @@ import {
   detectToolIntent,
   runTool,
   runGlobalCommand,
+  configGetText,
+  configSetText,
   sumArchiveEntries,
   type SessionState,
 } from '../src/cli';
 import type { ChatMessage } from '../src/chat';
+import { ensureConfigDir } from '../src/config';
 import { isolateHome } from './helpers';
 
 const execFileP = promisify(execFile);
@@ -251,6 +254,98 @@ test('runGlobalCommand：未知子命令 → 提示 + 帮助 + 退出码 1', asy
   assert.equal(code, 1);
   assert.ok(logs.some((l) => l.includes('未知命令：thatperson bogus')));
   assert.ok(logs.join('\n').includes('/help'));
+});
+
+// ===== 批次一：setup/reset/present/config 掩码（KS-7~13）=====
+
+/** 在独立临时 HOME 中执行 fn（避免污染模块级 iso.home） */
+async function withTempHome(fn: () => Promise<void>): Promise<void> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-cli5-'));
+  const saved = process.env.THATPERSON_HOME;
+  process.env.THATPERSON_HOME = home;
+  try {
+    await fn();
+  } finally {
+    if (saved === undefined) delete process.env.THATPERSON_HOME;
+    else process.env.THATPERSON_HOME = saved;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test('formatHelp：包含批次一新指令（setup/wizard/reset/present init/show）', () => {
+  const help = formatHelp();
+  assert.ok(help.includes('setup'), '帮助应含 setup');
+  assert.ok(help.includes('wizard'), '帮助应含 wizard 别名');
+  assert.ok(help.includes('reset'), '帮助应含 reset');
+  assert.ok(help.includes('present init'), '帮助应含 present init');
+  assert.ok(help.includes('present show'), '帮助应含 present show');
+  assert.ok(help.includes('apiKey'), '帮助应提到 apiKey 配置键');
+});
+
+test('configGetText / configSetText：apiKey 掩码回显且不泄漏明文（KS-10）', async () => {
+  await withTempHome(async () => {
+    const setText = configSetText('apiKey', 'sk-test1234abcd');
+    assert.ok(setText.includes('sk-***abcd'), `set 回显应掩码，实际：${setText}`);
+    assert.ok(!setText.includes('sk-test1234abcd'), 'set 回显不得含明文 Key');
+    const getText = configGetText('apiKey');
+    assert.ok(getText.includes('sk-***abcd'), `get 应掩码，实际：${getText}`);
+    assert.ok(!getText.includes('sk-test1234abcd'), 'get 不得含明文 Key');
+    const fullText = configGetText();
+    assert.ok(fullText.includes('API Key：sk-***abcd'), '全量输出应掩码');
+    assert.ok(!fullText.includes('sk-test1234abcd'), '全量输出不得含明文 Key');
+  });
+});
+
+test('runGlobalCommand(reset)：仅保留 apiKey 与 model，清 disabledSkills 与 configured', async () => {
+  await withTempHome(async () => {
+    const { configPath } = ensureConfigDir();
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ model: 'test-model', disabledSkills: ['code-op'], apiKey: 'sk-test1234abcd', configured: true }, null, 2),
+      'utf8',
+    );
+    await withCapturedLog(() => runGlobalCommand('reset', []));
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(cfg.model, 'test-model');
+    assert.equal(cfg.apiKey, 'sk-test1234abcd');
+    assert.equal(cfg.disabledSkills, undefined, 'reset 后应清除 disabledSkills');
+    assert.equal(cfg.configured, undefined, 'reset 后应清除 configured 标记');
+  });
+});
+
+test('runGlobalCommand(present init/show)：模板落盘不覆盖既有文件（KS-13）', async () => {
+  await withTempHome(async () => {
+    const logs = await withCapturedLog(() => runGlobalCommand('present', ['init']));
+    const output = logs.join('\n');
+    assert.ok(output.includes('已生成人格模板'), `应生成模板，实际：${output}`);
+    const home = process.env.THATPERSON_HOME as string;
+    const presentDir = path.join(home, 'present');
+    const files = fs.readdirSync(presentDir).filter((f) => f.endsWith('.md'));
+    assert.ok(files.length >= 3, `应生成多个人格模板，实际：${files.join(',')}`);
+    // 二次 init 不覆盖
+    const before = fs.readFileSync(path.join(presentDir, files[0]), 'utf8');
+    const logs2 = await withCapturedLog(() => runGlobalCommand('present', ['init']));
+    assert.ok(logs2.join('\n').includes('已存在未覆盖'));
+    assert.equal(fs.readFileSync(path.join(presentDir, files[0]), 'utf8'), before, '二次 init 不得覆盖既有文件');
+    // present show 输出当前生效人格
+    const showLogs = await withCapturedLog(() => runGlobalCommand('present', ['show']));
+    assert.ok(showLogs.join('\n').length > 0);
+  });
+});
+
+test('子进程：node cli.js --version 后主目录自动生成（KS-7）', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-ver-'));
+  const env = { ...process.env, THATPERSON_HOME: home };
+  try {
+    const { stdout } = await execFileP(process.execPath, [CLI_JS, '--version'], { env });
+    assert.equal(stdout.trim(), pkgVersion);
+    assert.ok(fs.existsSync(path.join(home, 'config.json')), '应生成 config.json');
+    for (const sub of ['present', 'skills', 'logs', 'history']) {
+      assert.ok(fs.existsSync(path.join(home, sub)), `应生成 ${sub}/ 目录`);
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ===== 记忆统计（S-10 数据源）=====
