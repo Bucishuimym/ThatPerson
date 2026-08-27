@@ -1,5 +1,12 @@
 # ThatPerson
 
+> **本地优先 · 记忆永远在你这。** 所有记忆落成 Markdown 存在你自己的磁盘上——随时可读、可改、可带走，不锁进任何云端黑盒。
+
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![npm](https://img.shields.io/npm/v/@nineteenfolk/thatperson)
+![npm downloads](https://img.shields.io/npm/dm/@nineteenfolk/thatperson)
+![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)
+
 个人 AI 管家：对话式 CLI，带长期记忆归档、技能系统与能力自省人格（Present）。
 
 ## 安装
