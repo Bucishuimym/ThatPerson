@@ -1,10 +1,14 @@
 /**
- * 内置工具白名单（第 5 期批次二 · KS-17/KS-18/KS-22）
+ * 内置工具白名单（第 5 期批次二 · KS-17/KS-18/KS-22；第 6 期批次一 · 插件化底座；第 6 期批次二 · KS-34 riskLevel 标注）
  *
  * 首批 8 工具：
  * - read：list_directory / read_file / read_vault_note / search_vault / search_memory
  * - write：append_memory / edit_present
  * - danger：run_shell（默认不注册，THATPERSON_ENABLE_SHELL=true 才注册，且仍需用户确认）
+ *
+ * 第 6 期批次一追加（src/tools/plugins/）：
+ * - write：move_file / rename_file / create_directory / edit_vault_note（恒注册）
+ * - read：web_search（默认不注册，THATPERSON_ENABLE_WEB_SEARCH=true 才注册）
  *
  * 全部 node:fs / node:path / node:child_process 原生实现，零第三方依赖；
  * 写入一律经过 sanitize 与路径白名单，search_memory 自实现，不依赖 chat.ts（避免循环依赖）。
@@ -14,7 +18,11 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { assertPathAllowed, envInt } from './guards';
 import { registerTool } from './registry';
-import type { ToolContext, ToolDef, ToolResult } from './types';
+import type { ToolContext, ToolDef, ToolHandlerResult } from './types';
+import { webSearchDef } from './plugins/web-search';
+import { moveFileDef, renameFileDef } from './plugins/move-file';
+import { createDirectoryDef } from './plugins/create-directory';
+import { editVaultNoteDef } from './plugins/edit-vault-note';
 
 // ===== 通用小工具 =====
 
@@ -175,7 +183,8 @@ const listDirectoryDef: ToolDef = {
   description: '列出指定目录（默认当前工作目录）下的子项名称与类型，最多 50 项。仅读操作，不得越出允许目录。',
   params: [{ name: 'dir', type: 'string', required: false, description: '要列出的目录，默认当前工作目录' }],
   policy: 'read',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L0',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const dir = typeof args.dir === 'string' && args.dir.trim() ? args.dir : ctx.cwd;
     const safe = assertPathAllowed(dir, ctx.allowedRoots);
     if (!safe) return { ok: false, error: 'path-not-allowed' };
@@ -202,7 +211,8 @@ const readFileDef: ToolDef = {
   description: '读取指定文件内容（UTF-8），路径必须在允许目录内，超过 2MB 拒绝。仅读操作。',
   params: [{ name: 'path', type: 'string', required: true, description: '文件路径（绝对或相对）' }],
   policy: 'read',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L0',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const raw = String(args.path);
     const safe = assertPathAllowed(raw, ctx.allowedRoots);
     if (!safe) return { ok: false, error: 'path-not-allowed' };
@@ -228,7 +238,8 @@ const readVaultNoteDef: ToolDef = {
     { name: 'date', type: 'string', required: false, description: '笔记日期 YYYY-MM-DD（或 2026年7月31日）' },
   ],
   policy: 'read',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L0',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const rawPath = typeof args.path === 'string' ? args.path.trim() : '';
     const date = typeof args.date === 'string' ? args.date.trim() : '';
     if (rawPath && date) return { ok: false, error: 'path 与 date 只能二选一' };
@@ -265,7 +276,8 @@ const searchVaultDef: ToolDef = {
   description: '在允许目录内递归搜索 .md 笔记中的关键词，返回最多 10 条命中（路径:行号: 内容）。仅读操作。',
   params: [{ name: 'keyword', type: 'string', required: true, description: '要搜索的关键词' }],
   policy: 'read',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L0',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const keyword = String(args.keyword).trim();
     if (!keyword) return { ok: false, error: 'keyword-empty' };
     const files = collectMdFilesFromRoots(ctx.allowedRoots, true);
@@ -279,7 +291,8 @@ const searchMemoryDef: ToolDef = {
   description: '在长期记忆 history/（home 与 cwd）中递归搜索关键词，返回最多 10 条命中。仅读操作，自实现不依赖 chat.ts。',
   params: [{ name: 'keyword', type: 'string', required: true, description: '要搜索的关键词' }],
   policy: 'read',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L0',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const keyword = String(args.keyword).trim();
     if (!keyword) return { ok: false, error: 'keyword-empty' };
     const roots = [path.join(ctx.home, 'history'), path.join(ctx.cwd, 'history')].filter((p) => {
@@ -315,7 +328,8 @@ const appendMemoryDef: ToolDef = {
     { name: 'confidence', type: 'string', required: false, enum: ['高', '中', '低'], description: '置信度，默认中' },
   ],
   policy: 'write',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L1',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const type = String(args.type);
     const insight = String(args.insight).trim();
     const dialog = typeof args.dialog === 'string' ? args.dialog.trim() : '';
@@ -370,7 +384,8 @@ const editPresentDef: ToolDef = {
     { name: 'oldValue', type: 'string', required: false, description: 'replace 模式下要替换的既有行（精确匹配）' },
   ],
   policy: 'write',
-  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolResult => {
+  riskLevel: 'L1',
+  handler: (args: Record<string, unknown>, ctx: ToolContext): ToolHandlerResult => {
     const file = String(args.file).trim();
     const content = String(args.content);
     const mode = typeof args.mode === 'string' ? args.mode : 'append';
@@ -412,12 +427,13 @@ const runShellDef: ToolDef = {
   description: '危险操作，需用户确认。在系统 Shell 中执行命令并返回标准输出（截断）。仅当 THATPERSON_ENABLE_SHELL=true 且用户逐次确认后可用，默认禁用。',
   params: [{ name: 'command', type: 'string', required: true, description: '要执行的命令' }],
   policy: 'danger',
-  handler: (args: Record<string, unknown>): Promise<ToolResult> => {
+  riskLevel: 'L3',
+  handler: (args: Record<string, unknown>): Promise<ToolHandlerResult> => {
     const command = String(args.command);
     const isWin = process.platform === 'win32';
     const shell = isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/sh';
     const shellArgs = isWin ? ['/d', '/s', '/c', command] : ['-c', command];
-    return new Promise<ToolResult>((resolve) => {
+    return new Promise<ToolHandlerResult>((resolve) => {
       execFile(
         shell,
         shellArgs,
@@ -434,7 +450,7 @@ const runShellDef: ToolDef = {
   },
 };
 
-/** 首批工具定义（run_shell 不在其中，单独按环境变量门控注册） */
+/** 内置工具定义（run_shell / web_search 不在其中，单独按环境变量门控注册） */
 const BUILTIN_DEFS: ToolDef[] = [
   listDirectoryDef,
   readFileDef,
@@ -443,12 +459,16 @@ const BUILTIN_DEFS: ToolDef[] = [
   searchMemoryDef,
   appendMemoryDef,
   editPresentDef,
+  moveFileDef,
+  renameFileDef,
+  createDirectoryDef,
+  editVaultNoteDef,
 ];
 
 /**
  * 注册全部内置工具并返回已注册工具名列表。
- * run_shell 默认不注册（KS-17）：仅当 process.env.THATPERSON_ENABLE_SHELL === 'true' 时注册；
- * 即使注册，executor 在 dangerAllowed=false（ReAct 循环）下仍返回 danger-disabled（双门控）。
+ * run_shell / web_search 默认不注册：仅当对应环境变量 === 'true' 时注册；
+ * run_shell 即使注册，executor 在 dangerAllowed=false（ReAct 循环）下仍返回 danger-disabled（双门控）。
  */
 export function registerBuiltins(): string[] {
   const names: string[] = [];
@@ -459,6 +479,10 @@ export function registerBuiltins(): string[] {
   if (process.env.THATPERSON_ENABLE_SHELL === 'true') {
     registerTool(runShellDef);
     names.push(runShellDef.name);
+  }
+  if (process.env.THATPERSON_ENABLE_WEB_SEARCH === 'true') {
+    registerTool(webSearchDef);
+    names.push(webSearchDef.name);
   }
   return names;
 }

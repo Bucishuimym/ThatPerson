@@ -25,6 +25,15 @@ trigger_keywords:
   - competitive landscape
   - capital cycle
   - supply-side analysis
+  - 赛道趋势
+  - 行业前景如何
+  - 值得关注吗
+  - 帮我研究
+  - 分析框架
+  - 行业现状
+  - 未来行情
+  - 资本周期分析
+  - 供给侧
 version: "2.0"
 author: BUCISHUI
 ---

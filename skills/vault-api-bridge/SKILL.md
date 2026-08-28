@@ -1,6 +1,21 @@
 ---
 name: vault-api-bridge
 description: 当需要从本知识库（Obsidian 仓库）读取/搜索/引用内容喂给 Agent、或撰写投喂脚本的使用说明时，使用此技能。触发场景：投喂 Agent、把笔记喂给 AI、编写调用 vault API 的脚本、搜索知识库内容、读取仓库文件、获取职业规划等笔记。底层对接 skill 目录下 scripts/自动化脚本/ 的 vault_api.py（统一入口）与 vault_env.py（环境探测/一键接入）。
+trigger_keywords:
+  - 投喂 Agent
+  - 把笔记喂给 AI
+  - 喂给 AI
+  - 投喂脚本
+  - 搜索知识库
+  - 搜索知识库内容
+  - 读取仓库文件
+  - 读取笔记
+  - 获取笔记
+  - 获取职业规划等笔记
+  - 调用 vault API
+  - 编写投喂脚本
+  - vault api
+  - obsidian 搜索
 version: 2.0
 author: BUCISHUI
 tools: [read_vault_note, search_vault, search_memory]

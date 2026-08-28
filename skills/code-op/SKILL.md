@@ -10,11 +10,21 @@ trigger_keywords:
   - 统一命名
   - 消除重复
   - 清理代码
+  - 改进代码
+  - 优化一下代码
+  - 帮我看看这段代码
+  - 代码整理
+  - 代码质量差
   - refactor
   - optimize
+  - optimize code
+  - improve code quality
   - code review
+  - review code
+  - clean up this code
   - cleanup
   - code smell
+  - make this code better
 version: 1.0
 author: BUCISHUI
 ---

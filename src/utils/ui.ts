@@ -12,6 +12,7 @@ import boxen from 'boxen';
 import ora from 'ora';
 import figlet from 'figlet';
 import logSymbols from 'log-symbols';
+import { getMonthlyTokenUsage } from '../chat';
 
 /** 分级日志：info / success / warn / error / debug / title */
 export const logger = {
@@ -30,9 +31,18 @@ export function showBanner(version: string): void {
   console.log(chalk.gray(`  版本: v${version}  |  个人管家\n`));
 }
 
-/** 状态卡片：boxen 圆角蓝边卡片（title + 键值对） */
+/** 状态卡片：boxen 圆角蓝边卡片（title + 键值对；KS-37 自动附加「本月已用 token / 目标进度」，≥80% ⚠️ 告警） */
 export function showStatusCard(title: string, lines: Record<string, string>): void {
-  const content = Object.entries(lines)
+  const card: Record<string, string> = { ...lines };
+  try {
+    const usage = getMonthlyTokenUsage();
+    const percent = Math.round(usage.percent * 100);
+    const warn = usage.over80 ? ' ⚠️ 已用 ≥80% 目标，请注意' : '';
+    card['本月已用 token'] = `${usage.total} / 目标 ${usage.budget}（${percent}%）${warn}`;
+  } catch {
+    card['本月已用 token'] = '（暂不可读）';
+  }
+  const content = Object.entries(card)
     .map(([key, value]) => `${chalk.bold(key)}: ${value}`)
     .join('\n');
   console.log(

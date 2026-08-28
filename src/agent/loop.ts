@@ -1,5 +1,5 @@
 /**
- * ReAct 循环（第 5 期批次二 · KS-20）
+ * ReAct 循环（第 5 期批次二 · KS-20；第 6 期批次二 · KS-36 卡点诊断 / KS-38 审计 / KS-39 allow-dir / KS-41 TTY 确认）
  *
  * 三段结构：解析（chat() 返回 toolCalls）→ 执行（executeTool，danger 默认禁用）
  * → 回灌（tool 结果拼进 messages 再调 chat()），循环直到无 toolCalls 或达 MAX_TOOL_ITERATIONS。
@@ -7,37 +7,77 @@
  * 安全约束：
  * - 审计日志只记参数键名（argsKeys），绝不记录参数值 / API Key；写入失败静默；
  * - 路径白名单 ctx.allowedRoots = [home, cwd, cwd/.thatperson, THATPERSON_VAULT_ROOT]；
- * - 连续失败 3 次 → 认输回复并终止；
+ * - 连续失败 3 次 → 卡点诊断模板（含等级/守卫/解锁，消灭「我做不到」）并终止；
+ * - 结构化失败信封（code/riskLevel/reason/unlockHint）回灌给模型；
+ * - 审计日志补记 riskLevel 与 decision（allowed/denied）；
+ * - TTY 确认：非 --mock 且 stdin 为 TTY 时，首次 path-denied 弹一次确认；非交互/管道/--mock 一律不弹不自动授权；
  * - --mock 路径完全不调用 chat()/API：首轮返回（离线演示）回复，支持通过
  *   THATPERSON_MOCK_TOOL_CALLS（JSON）注入工具调用以便测试三段可测。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { chat, type ChatMessage, type ChatOptions, type ChatResult, type ToolCall } from '../chat';
-import { memoryRoot } from '../config';
+import { loadConfig, memoryRoot } from '../config';
 import { executeTool } from '../tools/executor';
 import { envInt } from '../tools/guards';
-import type { ToolContext, ToolDef, ToolResult } from '../tools/types';
+import { getTool } from '../tools/registry';
+import type { ToolContext, ToolDef, ToolFailure, ToolResult } from '../tools/types';
 import type { LoadedMemories } from '../memory/types';
 
 /** 单轮最多执行的工具调用轮次（THATPERSON_MAX_TOOL_ITERATIONS 可调，默认 12） */
 export const MAX_TOOL_ITERATIONS = envInt('THATPERSON_MAX_TOOL_ITERATIONS', 12);
 /** 连续失败阈值：达到即认输 */
 const MAX_CONSECUTIVE_FAILURES = 3;
-/** 认输话术（必须含「暂时做不到」） */
-const GIVE_UP_REPLY = '暂时做不到这件事——连续几次工具调用都失败了，换个问法或稍后再试好吗？';
+/** 卡点守卫命名（KS-36：按 code 对应守卫名） */
+function guardName(code: string): string {
+  switch (code) {
+    case 'path-denied':
+      return '路径白名单守卫';
+    case 'danger-disabled':
+      return '权限门';
+    case 'param-invalid':
+      return '参数校验守卫';
+    case 'conflict':
+      return '写冲突守卫';
+    case 'redline-denied':
+      return '红线守卫';
+    case 'not-found':
+      return '资源定位守卫';
+    case 'unknown-tool':
+      return '注册表守卫';
+    case 'io-error':
+      return 'IO 守卫';
+    default:
+      return '执行守卫';
+  }
+}
+
+/** 卡点诊断模板（KS-36：含步骤/等级/守卫/解锁动作；解锁为空时输出「无自动解锁路径」；不含「我做不到」） */
+function formatGiveUp(step: number, tool: string, failure: ToolFailure): string {
+  const hint = failure.unlockHint && failure.unlockHint.trim() ? failure.unlockHint : '无自动解锁路径';
+  return (
+    `卡点诊断：第${step}步 · 工具「${tool}」被 ${guardName(failure.code)} 拦截` +
+    `（等级 ${failure.riskLevel}）：${failure.reason}。解锁动作：${hint}。`
+  );
+}
 /** 达上限收尾说明 */
 const MAX_ITERATION_NOTE = '\n\n（已达工具调用轮次上限，本次先到这里；如需继续，请再说一次。）';
 /** mock 回复前缀 */
 const MOCK_REPLY_PREFIX = '（离线演示）';
 
-/** 工具调用审计日志条目（只含参数键名，绝不含参数值 / Key） */
+/** 工具调用审计日志条目（只含参数键名，绝不含参数值 / Key；KS-38 补记 riskLevel 与 decision） */
 export interface ToolLogEntry {
   ts: string;
   tool: string;
   argsKeys: string[];
   status: 'ok' | 'error' | 'danger-blocked' | 'unknown';
   ms: number;
+  /** 风险等级（L0~L3） */
+  riskLevel: string;
+  /** 决策：allowed / denied（拒绝原因见 reason/code） */
+  decision: 'allowed' | 'denied';
+  reason?: string;
+  code?: string;
 }
 
 /** runAgentLoop 输入契约 */
@@ -106,6 +146,15 @@ function statusOf(result: ToolResult): ToolLogEntry['status'] {
   return 'error';
 }
 
+/** 从工具参数中提取候选路径（KS-41 TTY 确认弹窗展示用） */
+function extractPathArg(args: Record<string, unknown>): string | null {
+  for (const key of ['path', 'file', 'dir', 'source', 'targetDir']) {
+    const v = args[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 /**
  * ReAct 主循环。
  * 返回：{ reply 最终回复, toolLog 本次全部工具调用审计（顺序） }。
@@ -115,11 +164,21 @@ export async function runAgentLoop(
 ): Promise<{ reply: string; toolLog: ToolLogEntry[] }> {
   const cwd = process.cwd();
   const home = memoryRoot(cwd);
+  // KS-39：allowedRoots 合并 loadConfig().allowedDirs——授权后同一会话内重试即命中
   const allowedRoots = [...new Set(
-    [home, cwd, path.join(cwd, '.thatperson'), process.env.THATPERSON_VAULT_ROOT].filter(Boolean) as string[],
+    [
+      home,
+      cwd,
+      path.join(cwd, '.thatperson'),
+      process.env.THATPERSON_VAULT_ROOT,
+      ...(loadConfig().allowedDirs ?? []),
+    ].filter(Boolean) as string[],
   )].map((p) => path.resolve(p));
-  const ctx: ToolContext = { cwd, home, allowedRoots };
+  let ctx: ToolContext = { cwd, home, allowedRoots };
   const toolLog: ToolLogEntry[] = [];
+  // KS-41：TTY 确认状态（本轮最多弹一次；临时授权只入本轮 allowedRoots）
+  let ttyPromptedOnce = false;
+  const tempAllowedRoots: string[] = [];
 
   // mock 队列：每次 runAgentLoop 重新解析，保证测试之间隔离
   const mockQueue = input.isMock ? parseMockRounds(process.env.THATPERSON_MOCK_TOOL_CALLS) : null;
@@ -173,6 +232,8 @@ export async function runAgentLoop(
     // ===== 执行器 + 回灌器：逐个执行并把结果拼进 messages =====
     const toolMessages: ChatMessage[] = [];
     let anyOk = false;
+    let lastTool = '';
+    let lastFailure: ToolFailure | null = null;
     for (const tc of toolCalls) {
       const started = Date.now();
       let parsedArgs: Record<string, unknown> = {};
@@ -183,16 +244,53 @@ export async function runAgentLoop(
           throw new Error('arguments 必须是 JSON 对象');
         }
         result = await executeTool(tc.name, parsedArgs, ctx, { dangerAllowed: false });
+        // KS-41：TTY 确认——首次 path-denied 弹一次「是否允许访问 <路径>？(y/N)」；
+        // 批准 → 临时入本轮 allowedRoots 并提示持久化；拒绝/非交互（管道/--input-file/--mock）不弹不自动授权。
+        if (
+          !result.ok &&
+          result.code === 'path-denied' &&
+          !input.isMock &&
+          process.stdin.isTTY &&
+          !ttyPromptedOnce
+        ) {
+          const candidate = extractPathArg(parsedArgs);
+          if (candidate) {
+            ttyPromptedOnce = true;
+            const { ask } = await import('../utils/ui');
+            const approved = await ask(`是否允许访问 ${candidate}？(y/N)`, 'confirm');
+            if (approved) {
+              tempAllowedRoots.push(path.resolve(candidate));
+              ctx = { ...ctx, allowedRoots: [...new Set([...ctx.allowedRoots, ...tempAllowedRoots])] };
+              console.log('[ThatPerson] 已临时允许本轮访问该路径；如需持久化请运行 thatperson allow-dir <绝对路径>');
+              result = await executeTool(tc.name, parsedArgs, ctx, { dangerAllowed: false });
+            }
+          }
+        }
       } catch {
-        result = { ok: false, error: 'invalid-json-args' };
+        result = {
+          ok: false,
+          error: 'invalid-json-args',
+          code: 'param-invalid',
+          riskLevel: getTool(tc.name)?.riskLevel ?? 'L0',
+          reason: '工具参数 JSON 解析失败',
+          unlockHint: '',
+        };
       }
       const status = statusOf(result);
+      if (!result.ok) {
+        lastTool = tc.name;
+        lastFailure = result;
+      }
       const entry: ToolLogEntry = {
         ts: new Date().toISOString(),
         tool: tc.name,
         argsKeys: Object.keys(parsedArgs).sort(),
         status,
         ms: Date.now() - started,
+        riskLevel: result.ok ? (getTool(tc.name)?.riskLevel ?? 'L0') : result.riskLevel,
+        decision: result.ok ? 'allowed' : 'denied',
+        reason: result.ok ? undefined : result.reason,
+        code: result.ok ? undefined : result.code,
       };
       toolLog.push(entry);
       appendAuditLog(home, entry);
@@ -202,8 +300,9 @@ export async function runAgentLoop(
 
     consecutiveFailures = anyOk ? 0 : consecutiveFailures + 1;
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      // 连续失败 3 次 → 认输
-      return { reply: GIVE_UP_REPLY, toolLog };
+      // 连续失败 3 次 → 卡点诊断模板（KS-36：等级/守卫/解锁，不再「我做不到」）
+      const giveUp = lastFailure ? formatGiveUp(round + 1, lastTool, lastFailure) : reply;
+      return { reply: giveUp, toolLog };
     }
     messages.push(...toolMessages);
   }

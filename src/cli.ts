@@ -27,8 +27,11 @@ import {
 } from './memory/types';
 import { extractArchives, buildSessionSummary, detectCrossTurnPatterns, extractContentModeArchives } from './parser/archive';
 import {
+  allowDir,
+  denyDir,
   ensureConfigDir,
   loadConfig,
+  listAllowedDirs,
   memoryRoot,
   resolveHistoryDir,
   thatPersonHome,
@@ -47,6 +50,8 @@ import {
 } from './config';
 import { runSetupWizard } from './setup';
 import { runAgentLoop } from './agent/loop';
+import { listSessions, loadSession, titleSnapshot, upsertSessionMeta } from './session';
+import { exportMemory, importMemory } from './portable';
 import { listTools } from './tools/registry';
 import { registerBuiltins } from './tools/builtin';
 import { listSkills, matchSkill, type SkillInfo } from './skill';
@@ -123,6 +128,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (a.startsWith('--input-file=')) {
       out.inputFile = a.slice('--input-file='.length);
+    } else if (a === '--dir') {
+      // 全局指令参数透传（thatperson export [--dir <目标路径>]）：原样进入 commandArgs
+      const value = args[i + 1];
+      if (value && !value.startsWith('-')) {
+        positional.push(a, value);
+        i += 1;
+      } else {
+        out.unknownArgs.push(a);
+      }
+    } else if (a.startsWith('--dir=')) {
+      positional.push(a);
     } else if (a.startsWith('-')) {
       out.unknownArgs.push(a);
     } else {
@@ -155,6 +171,8 @@ export function formatHelp(): string {
     '  setup       首次配置向导（输入 API Key 与模型，写回 config.json）',
     '  wizard      setup 的别名',
     '  reset       重置配置（仅保留 apiKey 与 model；--keep-present 保留 present 覆盖）',
+    '  allow-dir <绝对路径>  授权目录加入白名单（授权后即时生效，可持久化）',
+    '  deny-dir <绝对路径>   从白名单移除授权目录（幂等）',
     '  present init  生成出厂人格模板到主目录 present/（不覆盖既有文件）',
     '  present show  查看当前生效人格',
     '  tools list    列出已注册工具（read/write/danger）',
@@ -163,6 +181,8 @@ export function formatHelp(): string {
     '  memory clean            对归档文件执行压缩清理',
     '  session list            列出历史会话（session_logs）',
     '  session clear           清空当前内存会话',
+    '  export [--dir <目标路径>]  导出记忆（history/present/skills）为可携带包（不含 API Key）',
+    '  import <导出目录>         导入记忆包（校验 manifest 与校验和，冲突先备份不覆盖）',
     '  config get [key]        查看配置（model / disabledSkills / apiKey，apiKey 掩码回显）',
     '  config set <key> <val>  修改配置（apiKey 掩码回显）',
     '  skills list             列出已安装技能与启用状态',
@@ -175,6 +195,9 @@ export function formatHelp(): string {
     '  /clear      清空终端屏幕（不影响会话）',
     '  /reset      重置当前会话（清空历史/摘要/近期输入，不落盘）',
     '  /save       将当前会话保存为快照（history/sessions/，不覆盖同名文件）',
+    '  /list       列出已保存的会话快照（id | 标题 | 时间）',
+    '  /load <id>  恢复指定会话（历史 + 摘要注入当前会话）',
+    '  /title <新标题>  修改最近一个快照的标题',
     '  /exit       退出程序',
     '  /update     手动检查更新（绕过 12h 缓存；跳过策略仍生效）',
     '',
@@ -206,14 +229,45 @@ export function resetSession(session: SessionState): void {
   session.recentUserTexts.length = 0;
 }
 
-/** /save：把当前会话序列化为快照写入 history/sessions/（不得覆盖已存在同名文件，S-02） */
+/** 快照标题：首条用户消息前 20 字（中文按句末标点截断，对齐参考实现）；无用户消息回退「未命名会话」 */
+function snapshotTitle(session: SessionState): string {
+  const first = session.history.find((m) => m.role === 'user');
+  if (!first) return '未命名会话';
+  const text = first.content.replace(/\s+/g, ' ').trim();
+  if (!text) return '未命名会话';
+  const head = text.slice(0, 20);
+  const end = /[。！？!?…]/.exec(head);
+  return end ? head.slice(0, end.index + 1) : head;
+}
+
+/** summary 截断到 200 字（frontmatter 单行；超长加省略号） */
+function snapshotSummary(summary: string): string {
+  const s = (summary ?? '').replace(/\r?\n/g, ' ');
+  if (s.length <= 200) return s;
+  return `${s.slice(0, 199)}…`;
+}
+
+/** /save：把当前会话序列化为快照写入 history/sessions/（frontmatter + 既有正文格式，不覆盖同名文件，S-02/KS-42） */
 export function saveSessionSnapshot(session: SessionState, historyDir: string): string {
   const sessionsDir = path.join(historyDir, 'sessions');
   fs.mkdirSync(sessionsDir, { recursive: true });
   const now = new Date();
   const p2 = (n: number): string => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
-  const content = [
+  const iso = now.toISOString();
+  const title = snapshotTitle(session);
+  const summary = snapshotSummary(session.summary);
+  const frontmatter = [
+    '---',
+    `id: session_${stamp.replace('-', '_')}`,
+    `title: ${title}`,
+    `created_at: ${iso}`,
+    `updated_at: ${iso}`,
+    `summary: ${summary}`,
+    '---',
+    '',
+  ].join('\n');
+  const body = [
     `# 会话快照 · ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}:${p2(now.getSeconds())}`,
     '',
     `- 消息数：${session.history.length}`,
@@ -225,6 +279,7 @@ export function saveSessionSnapshot(session: SessionState, historyDir: string): 
       '',
     ]),
   ].join('\n');
+  const content = `${frontmatter}${body}`;
 
   const writeSnapshot = (target: string): string | null => {
     try {
@@ -244,7 +299,21 @@ export function saveSessionSnapshot(session: SessionState, historyDir: string): 
     written = writeSnapshot(file);
     i += 1;
   }
+  // 索引登记：id 与文件名一一对应（同秒冲突时后缀递增，保证 id 唯一不重复）
+  upsertSessionMeta(historyDir, {
+    id: `session_${path.basename(written).replace(/^session[-_]/, '').replace(/\.md$/, '').replace(/-/g, '_')}`,
+    title,
+    created_at: iso,
+    file: path.basename(written),
+  });
   return written;
+}
+
+/** /list：读 index.json（缺失/损坏自动重建），打印 id | title | 时间；无快照时提示（KS-42） */
+export function formatSessionList(historyDir: string): string {
+  const metas = listSessions(historyDir);
+  if (metas.length === 0) return '暂无会话快照（对话内输入 /save 保存当前会话）';
+  return metas.map((s) => `  ${s.id} | ${s.title} | ${s.created_at}`).join('\n');
 }
 
 // ===== 指令-执行-返回通道（S-05）=====
@@ -502,6 +571,48 @@ function createInternalCommands(
         logger.error(`保存会话快照失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
+    '/list': (): void => {
+      try {
+        console.log(formatSessionList(resolveHistoryDir()));
+      } catch (err) {
+        logger.error(`读取会话列表失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    '/load': (args: string): void => {
+      const id = (args ?? '').trim().split(/\s+/)[0] ?? '';
+      if (!id) {
+        logger.warn('用法：/load <会话id>（可用 /list 查看）');
+        return;
+      }
+      try {
+        const recovered = loadSession(id, resolveHistoryDir());
+        ctx.session.history = recovered.history;
+        ctx.session.summary = recovered.summary;
+        ctx.session.recentUserTexts.length = 0;
+        logger.success(`已恢复会话 ${id}（${Math.floor(recovered.history.length / 2)} 轮，含摘要）`);
+      } catch (err) {
+        logger.error(`恢复会话失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    '/title': (args: string): void => {
+      const title = (args ?? '').trim();
+      if (!title) {
+        logger.warn('用法：/title <新标题>');
+        return;
+      }
+      try {
+        const metas = listSessions(resolveHistoryDir());
+        if (metas.length === 0) {
+          logger.warn('暂无会话快照，请先 /save 保存');
+          return;
+        }
+        const id = metas[0].id; // id 缺省 → 最近一个快照（KS-44）
+        titleSnapshot(id, title, resolveHistoryDir());
+        logger.success(`已更新会话「${id}」标题：${title}`);
+      } catch (err) {
+        logger.error(`修改标题失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
     '/update': async (): Promise<void> => {
       if (ctx.isMock) {
         logger.info('离线模式（--mock），跳过更新检查');
@@ -535,6 +646,7 @@ async function runStatus(): Promise<void> {
     'API Key': hasApiKey() ? maskApiKey(resolveApiKey() ?? '') : '未配置',
     记忆条目: `${memoryTotal} 条`,
     技能数量: `${skills.length} 个`,
+    授权目录: `${listAllowedDirs().length} 个`,
     'Token 预算': `${SYSTEM_TOKEN_BUDGET} / 轮`,
     工作目录: process.cwd(),
     全局目录: thatPersonHome(),
@@ -748,6 +860,34 @@ export async function runGlobalCommand(
       console.log('已重置配置（仅保留 apiKey 与 model）。对话内 /reset 仅清会话，语义不同。');
       return 0;
     }
+    case 'allow-dir': {
+      const target = (args[0] ?? '').trim();
+      if (!target) {
+        logger.warn('用法：thatperson allow-dir <绝对路径>');
+        return 1;
+      }
+      const result = allowDir(target);
+      if (!result.ok) {
+        logger.error(result.error);
+        return 1;
+      }
+      logger.success(`已授权目录：${path.resolve(target)}（可运行 thatperson deny-dir <路径> 撤销）`);
+      return 0;
+    }
+    case 'deny-dir': {
+      const target = (args[0] ?? '').trim();
+      if (!target) {
+        logger.warn('用法：thatperson deny-dir <绝对路径>');
+        return 1;
+      }
+      const result = denyDir(target);
+      if (!result.ok) {
+        logger.error(result.error);
+        return 1;
+      }
+      logger.success(`已移除授权目录：${path.resolve(target)}`);
+      return 0;
+    }
     case 'present': {
       const sub = (args[0] ?? '').toLowerCase();
       if (sub === 'init') {
@@ -808,6 +948,64 @@ export async function runGlobalCommand(
         return 1;
       }
       return 0;
+    }
+    case 'export': {
+      let targetDir = process.cwd();
+      for (let i = 0; i < args.length; i += 1) {
+        const a = args[i];
+        if (a === '--dir') {
+          const value = args[i + 1];
+          if (!value || value.startsWith('-')) {
+            logger.warn('用法：thatperson export [--dir <目标路径>]');
+            return 1;
+          }
+          targetDir = path.resolve(value);
+          i += 1;
+        } else if (a.startsWith('--dir=')) {
+          targetDir = path.resolve(a.slice('--dir='.length));
+        } else {
+          logger.warn(`未知参数：${a}（用法：thatperson export [--dir <目标路径>]）`);
+          return 1;
+        }
+      }
+      try {
+        const home = thatPersonHome();
+        const result = exportMemory({
+          home,
+          historyDir,
+          targetDir,
+          presentDir: path.join(home, 'present'),
+          skillsDir: path.join(home, 'skills'),
+          configMask: { ...loadConfig() },
+        });
+        console.log(`已导出记忆到：${result.exportRoot}`);
+        console.log(
+          `清单摘要：${result.manifest.entries.length} 个文件 · 版本 ${result.manifest.version} · 导出时间 ${result.manifest.exportedAt}`,
+        );
+        return 0;
+      } catch (err) {
+        logger.error(`导出失败：${err instanceof Error ? err.message : String(err)}`);
+        return 1;
+      }
+    }
+    case 'import': {
+      const exportDir = (args[0] ?? '').trim();
+      if (!exportDir) {
+        logger.warn('用法：thatperson import <导出目录>');
+        return 1;
+      }
+      try {
+        const result = importMemory({
+          home: thatPersonHome(),
+          historyDir,
+          exportDir: path.resolve(exportDir),
+        });
+        console.log(`已导入 ${result.imported} 个文件，冲突备份 ${result.conflicts.length} 个`);
+        return 0;
+      } catch (err) {
+        logger.error(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+        return 1;
+      }
     }
     case 'config': {
       const sub = (args[0] ?? '').toLowerCase();

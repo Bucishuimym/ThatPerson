@@ -177,3 +177,117 @@ test('buildChatMessages：无 toolCalls 的 assistant 消息不含 tool_calls �
   assert.equal(msgs[1].role, 'assistant');
   assert.equal('tool_calls' in msgs[1], false, '普通 assistant 消息不应凭空带 tool_calls');
 });
+
+// ===== 第 6 期批次二 · token 台账（D-4 测试先行，红态契约；recordTokenUsage/getMonthlyTokenUsage 尚未实现，经命名空间断言调用） =====
+import * as chatB2Module from '../src/chat';
+
+interface B2TokenUsageInput {
+  promptTokens?: number;
+  completionTokens?: number;
+  source?: string;
+  month?: string;
+}
+interface B2TokenRecord {
+  ts: string;
+  source: string;
+  promptTokens: number;
+  completionTokens: number;
+  total: number;
+}
+interface B2MonthlyUsage {
+  month: string;
+  budget: number;
+  total: number;
+  promptTokens: number;
+  completionTokens: number;
+  percent: number;
+  over80: boolean;
+  mockTokens: number;
+  records: B2TokenRecord[];
+}
+interface B2TokenLedger {
+  recordTokenUsage(
+    input: B2TokenUsageInput,
+  ): Promise<{ ok: boolean; over80?: boolean }> | { ok: boolean; over80?: boolean };
+  getMonthlyTokenUsage(month?: string): B2MonthlyUsage;
+}
+const chatB2 = chatB2Module as unknown as B2TokenLedger;
+
+/** 递归检查目录树下是否有文件（文件名或内容）包含指定文本，证明台账确实落盘 */
+function treeContainsText(dir: string, text: string): boolean {
+  if (!fs.existsSync(dir)) return false;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (treeContainsText(full, text)) return true;
+    } else if (entry.isFile()) {
+      if (entry.name.includes(text)) return true;
+      try {
+        if (fs.readFileSync(full, 'utf8').includes(text)) return true;
+      } catch {
+        // 跳过不可读文件
+      }
+    }
+  }
+  return false;
+}
+
+test('第6期批次二 token 台账：recordTokenUsage 落盘，getMonthlyTokenUsage 可统计', async () => {
+  const month = '2099-01';
+  const res = await chatB2.recordTokenUsage({ promptTokens: 120, completionTokens: 30, month });
+  assert.equal(res.ok, true, '记录 token 应成功');
+  const summary = chatB2.getMonthlyTokenUsage(month);
+  assert.equal(summary.month, month);
+  assert.equal(summary.total, 150, '总 token 应 = prompt + completion');
+  assert.equal(summary.promptTokens, 120);
+  assert.equal(summary.completionTokens, 30);
+  assert.ok(summary.percent >= 0, '台账应给出用量百分比');
+  assert.ok(summary.records.length >= 1, '台账应含记录明细');
+  assert.equal(summary.records[0].total, 150, '明细 total 应与总量一致');
+  assert.ok(treeContainsText(iso.home, month), '台账应落盘（磁盘上可检索到该月份）');
+});
+
+test('第6期批次二 token 台账：累计达 80% 月预算触发告警标志，低用量不触发', async () => {
+  const month = '2099-02';
+  const base = chatB2.getMonthlyTokenUsage(month);
+  assert.ok(base.budget > 0, '台账应暴露月预算');
+  const big = Math.ceil(base.budget * 0.9);
+  const res = await chatB2.recordTokenUsage({ promptTokens: big, completionTokens: 0, month });
+  const summary = chatB2.getMonthlyTokenUsage(month);
+  const triggered = res.over80 === true || summary.over80 === true;
+  assert.equal(triggered, true, '达 80% 阈值应触发告警标志');
+
+  const fresh = '2099-03';
+  await chatB2.recordTokenUsage({ promptTokens: 5, completionTokens: 5, month: fresh });
+  const freshSummary = chatB2.getMonthlyTokenUsage(fresh);
+  assert.equal(freshSummary.over80, false, '低用量不应触发告警');
+});
+
+test('第6期批次二 token 台账：mock 模式记录模拟数据且可区分来源', async () => {
+  const month = '2099-04';
+  const res = await chatB2.recordTokenUsage({ promptTokens: 40, completionTokens: 20, source: 'mock', month });
+  assert.equal(res.ok, true);
+  const summary = chatB2.getMonthlyTokenUsage(month);
+  assert.equal(summary.total, 60);
+  assert.equal(summary.mockTokens, 60, 'mock 用量应单独统计');
+  assert.ok(summary.records.some((r) => r.source === 'mock' && r.total === 60), '台账应标记 mock 来源');
+});
+
+test('第6期批次二 token 台账：mock 对话自动记录模拟用量', async () => {
+  const saved = process.env.AAGENTDS_API_KEY;
+  delete process.env.AAGENTDS_API_KEY;
+  try {
+    const before = chatB2.getMonthlyTokenUsage().total;
+    await chatB2Module.chat(
+      '测试 mock 用量',
+      { profile: {}, importantDates: null, patterns: null, recentSessions: [] },
+      { isMock: true },
+    );
+    const after = chatB2.getMonthlyTokenUsage();
+    assert.ok(after.total > before, 'mock 对话应产生模拟用量记录');
+    assert.ok(after.records.some((r) => r.source === 'mock'), 'mock 记录应带 mock 来源标记');
+  } finally {
+    if (saved === undefined) delete process.env.AAGENTDS_API_KEY;
+    else process.env.AAGENTDS_API_KEY = saved;
+  }
+});

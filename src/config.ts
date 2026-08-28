@@ -19,6 +19,11 @@
  *   config.json 写盘 0600；maskApiKey 掩码；apiKeyGuidance 指向 thatperson setup 向导；
  * - KS-11：config.json 首次创建含 configured:false；isConfigured() / resetConfig()（reset 仅保留 model+apiKey）；
  * - KS-12：取消「项目级/用户级」二元，改为「主目录 ~/.thatperson → 随身目录 cwd/.thatperson → 包内兜底」。
+ *
+ * 第 6 期（批次二 · KS-39/KS-40）：
+ * - allowedDirs 进 CONFIG_KEY_WHITELIST（get 可读）；config set 白名单不含它（禁止对话/命令行越权写入）；
+ * - allowDir/denyDir：绝对路径 + 存在目录 + realpath 复检（符号链接/junction 逃逸拒绝）+ 写回 0600；
+ * - denyDir 对称移除、幂等；resetConfig 保留 allowedDirs 且显式写 configured:false。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -27,9 +32,12 @@ import path from 'node:path';
 /** 默认模型（config.json 缺省值；模型唯一来源，chat.ts 请求模型以 loadConfig().model 为准） */
 export const DEFAULT_MODEL = 'deepseek-v4-flash';
 
-/** config get/set 可写键白名单（S-03 / KS-9）：model + disabledSkills + apiKey */
-export const CONFIG_KEY_WHITELIST = ['model', 'disabledSkills', 'apiKey'] as const;
+/** 配置键白名单（S-03 / KS-9 / KS-40）：model + disabledSkills + apiKey + allowedDirs */
+export const CONFIG_KEY_WHITELIST = ['model', 'disabledSkills', 'apiKey', 'allowedDirs'] as const;
 export type ConfigKey = (typeof CONFIG_KEY_WHITELIST)[number];
+
+/** config set 可写键（KS-40：allowedDirs 只经 allowDir/denyDir 授权写入，set 白名单不含它） */
+const CONFIG_SET_KEY_WHITELIST: readonly string[] = ['model', 'disabledSkills', 'apiKey'];
 
 export interface ThatPersonConfig {
   model: string;
@@ -38,6 +46,8 @@ export interface ThatPersonConfig {
   apiKey?: string;
   /** 是否已完成首次配置（向导/写入 apiKey 时置 true；旧文件缺省 false） */
   configured?: boolean;
+  /** 授权目录白名单（KS-39/KS-40：绝对路径、去重；仅 allowDir/denyDir 维护） */
+  allowedDirs?: string[];
 }
 
 /** config 写回结果：{ ok: true } 或 { ok: false, error } */
@@ -78,14 +88,22 @@ export function loadConfig(): ThatPersonConfig {
     const disabledSkills = Array.isArray(raw.disabledSkills)
       ? raw.disabledSkills.filter((x): x is string => typeof x === 'string' && x.length > 0).map(normalizeSkillName)
       : [];
+    const allowedDirs = Array.isArray(raw.allowedDirs)
+      ? [...new Set(
+          raw.allowedDirs
+            .filter((x): x is string => typeof x === 'string' && path.isAbsolute(x))
+            .map((p) => path.resolve(p)),
+        )]
+      : [];
     return {
       model: typeof raw.model === 'string' && raw.model ? raw.model : DEFAULT_MODEL,
       disabledSkills: [...new Set(disabledSkills)],
       apiKey: typeof raw.apiKey === 'string' && raw.apiKey ? raw.apiKey : undefined,
       configured: raw.configured === true,
+      allowedDirs,
     };
   } catch {
-    return { model: DEFAULT_MODEL, disabledSkills: [] };
+    return { model: DEFAULT_MODEL, disabledSkills: [], allowedDirs: [] };
   }
 }
 
@@ -96,14 +114,15 @@ export function getConfigValue(key: ConfigKey): string | string[] | undefined {
 
 /**
  * 写回 config.json（`thatperson config set <key> <value>`）：
- * - key 必须 ∈ CONFIG_KEY_WHITELIST（model / disabledSkills / apiKey），value 非空字符串；
+ * - key 必须 ∈ CONFIG_SET_KEY_WHITELIST（model / disabledSkills / apiKey），value 非空字符串；
+ * - allowedDirs 不在 set 白名单内：授权目录只能经 allowDir/denyDir 写入（KS-40）；
  * - disabledSkills 支持 JSON 字符串数组或逗号/顿号分隔；
  * - apiKey 写入后自动置 configured: true（与 setup 向导口径一致）；
  * - 读-改-写：保留其他字段；config.json 已存在但无法解析时拒绝写回（不静默覆盖既有文件）。
  */
 export function setConfigValue(key: string, value: string): SetConfigResult {
-  if (!(CONFIG_KEY_WHITELIST as readonly string[]).includes(key)) {
-    return { ok: false, error: `不支持的配置键：${key}（可用：${CONFIG_KEY_WHITELIST.join('、')}）` };
+  if (!CONFIG_SET_KEY_WHITELIST.includes(key)) {
+    return { ok: false, error: `不支持的配置键：${key}（可用：${CONFIG_SET_KEY_WHITELIST.join('、')}）` };
   }
   const v = value.trim();
   if (!v) return { ok: false, error: '配置值不能为空' };
@@ -176,6 +195,99 @@ export function enableSkill(name: string): SetConfigResult {
   const target = normalizeSkillName(name);
   if (!target) return { ok: false, error: '技能名不能为空' };
   return updateDisabledSkills((list) => list.filter((x) => x !== target));
+}
+
+// ===== 第 6 期批次二 · allow-dir / deny-dir 授权目录（KS-39/KS-40） =====
+
+/** Windows 路径比较忽略大小写（realpath 归一对比） */
+function samePath(a: string, b: string): boolean {
+  if (process.platform === 'win32') return a.toLowerCase() === b.toLowerCase();
+  return a === b;
+}
+
+/** 读当前 allowedDirs（绝对路径、去重；损坏/缺失为空数组） */
+function currentAllowedDirs(config: Record<string, unknown>): string[] {
+  const list = Array.isArray(config.allowedDirs)
+    ? (config.allowedDirs as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
+  return [...new Set(list.map((p) => path.resolve(p)))];
+}
+
+/** 当前授权目录列表（KS-39：status / 审计展示用） */
+export function listAllowedDirs(): string[] {
+  return loadConfig().allowedDirs ?? [];
+}
+
+/**
+ * 授权目录（KS-39/KS-41 注入防护）：严格校验——
+ * 1) path.isAbsolute(raw) 否则拒绝；
+ * 2) raw 按 / 与 \ 分段不得含 '..'；
+ * 3) 目标必须存在且为目录；
+ * 4) fs.realpathSync(resolved) 与 path.resolve(resolved) 不一致（符号链接/junction 逃逸）拒绝；
+ * 5) 已存在幂等返回 ok；写回 config.json（保留其他字段，0600）。
+ * 对话注入载荷（附加文本/相对路径/..）一律无法通过校验（SEC-b2）。
+ */
+export function allowDir(raw: string): SetConfigResult {
+  const input = (raw ?? '').trim();
+  if (!input) return { ok: false, error: '路径不能为空' };
+  if (!path.isAbsolute(input)) return { ok: false, error: '仅支持绝对路径' };
+  if (input.split(/[\\/]/).includes('..')) return { ok: false, error: '路径不能包含 .. 段' };
+  const resolved = path.resolve(input);
+  let real: string;
+  let stat: fs.Stats;
+  try {
+    real = fs.realpathSync(resolved);
+    stat = fs.statSync(real);
+  } catch {
+    return { ok: false, error: '目录不存在或不可访问' };
+  }
+  if (!stat.isDirectory()) return { ok: false, error: '目标不是目录' };
+  if (!samePath(real, resolved)) {
+    return { ok: false, error: '符号链接/软链路径不接受，请使用真实路径' };
+  }
+  const { configPath } = ensureConfigDir();
+  const current = readExistingConfig(configPath);
+  if (current === null) {
+    return { ok: false, error: 'config.json 已存在但无法解析，请人工修复后再试（拒绝静默覆盖）' };
+  }
+  const next = currentAllowedDirs(current);
+  if (!next.some((d) => samePath(d, resolved))) next.push(resolved);
+  current.allowedDirs = next;
+  return writeConfig(configPath, current);
+}
+
+/**
+ * 撤销授权目录（KS-40 对称移除）：以 realpath 归一后删除对应条目；
+ * 未授权/不存在/非法输入一律幂等返回 ok；保留其余授权。
+ */
+export function denyDir(raw: string): SetConfigResult {
+  const input = (raw ?? '').trim();
+  let canonical: string | null = null;
+  if (input && path.isAbsolute(input) && !input.split(/[\\/]/).includes('..')) {
+    const resolved = path.resolve(input);
+    try {
+      canonical = fs.realpathSync(resolved);
+    } catch {
+      canonical = resolved;
+    }
+  }
+  const { configPath } = ensureConfigDir();
+  const current = readExistingConfig(configPath);
+  if (current === null) {
+    return { ok: false, error: 'config.json 已存在但无法解析，请人工修复后再试（拒绝静默覆盖）' };
+  }
+  const next = currentAllowedDirs(current).filter((d) => {
+    if (canonical === null) return true; // 非法输入：不改动任何条目（幂等 ok）
+    let storedReal: string;
+    try {
+      storedReal = fs.realpathSync(d);
+    } catch {
+      storedReal = d;
+    }
+    return !samePath(storedReal, canonical);
+  });
+  current.allowedDirs = next;
+  return writeConfig(configPath, current);
 }
 
 /** 技能是否已禁用（大小写不敏感） */
@@ -277,7 +389,8 @@ export function apiKeyGuidance(): string {
 }
 
 /**
- * 重置配置（KS-11）：config.json 仅保留 model 与 apiKey（清 disabledSkills、configured 置 false）。
+ * 重置配置（KS-11 / KS-40）：config.json 保留 model / apiKey / allowedDirs（授权不误清），
+ * 清 disabledSkills、显式写 configured:false。
  * present 覆盖文件的清理由 cli.ts 处理，本函数只负责 config 层写回。
  */
 export function resetConfig(_opts?: { keepPresent?: boolean }): SetConfigResult {
@@ -288,8 +401,11 @@ export function resetConfig(_opts?: { keepPresent?: boolean }): SetConfigResult 
   }
   const next: Record<string, unknown> = {
     model: typeof current.model === 'string' && current.model ? current.model : DEFAULT_MODEL,
+    configured: false,
   };
   const apiKey = typeof current.apiKey === 'string' ? current.apiKey.trim() : '';
   if (apiKey) next.apiKey = apiKey;
+  const allowedDirs = currentAllowedDirs(current);
+  if (allowedDirs.length > 0) next.allowedDirs = allowedDirs;
   return writeConfig(configPath, next);
 }

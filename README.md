@@ -30,9 +30,11 @@ thatperson status           # 状态卡片（版本/模型/记忆/技能/Token �
 thatperson skills list      # 列出已安装技能
 thatperson memory search <关键词>
 thatperson config get model
+thatperson export           # 导出记忆包（history/present/skills + manifest 校验和，不含 API Key）
+thatperson import <导出目录> # 导入记忆包（校验后合并，冲突先备份不覆盖）
 ```
 
-对话内内部指令：`/help` `/history` `/clear` `/reset` `/save` `/exit` `/update`。
+对话内内部指令：`/help` `/history` `/clear` `/reset` `/save` `/list` `/load <id>` `/title <新标题>` `/exit` `/update`。
 
 ## 记忆与配置
 
@@ -41,6 +43,7 @@ thatperson config get model
 - 首次配置：`thatperson setup` 写回 `config.json`（含 `apiKey` 掩码存储与 `configured` 标记）；旧配置文件读取时给缺省值、不静默改写。
 - 出厂技能库随包发布（`skills/`），用户级 `~/.thatperson/skills/` 可扩展。
 - 人格加载优先级：**主目录 `~/.thatperson/present/` > 随身目录 `<cwd>/.thatperson/present/` > 出厂级（包内 `present/`）**；缺失文件自动回退下一级，同名不覆盖。
+- **记忆可带走**：`thatperson export` 把记忆（history/ 快照与归档、present/、用户级 skills/）打包为可携带目录 + `manifest.json`（逐文件 sha256 校验和），`thatperson import` 校验后合并——同名冲突自动备份到 `history/backups/` 不覆盖，API Key 永不进入导出包、也不被导入（导出只含掩码）。
 
 ## 发布内容（files 白名单）
 

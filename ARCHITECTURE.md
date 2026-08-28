@@ -2,7 +2,7 @@
 
 > 定位：项目的**活地图** —— 数据流 / 文件职责 / 测试契约 / 关键常量 / 安全红线 / 变更日志。
 > 维护纪律：**每次迭代结束必须更新本文件**，与测试全绿一起作为「迭代完成」的定义。
-> 最新核对：2026-08-22（156 用例 155 通过 / 1 跳过 / 0 失败；第 5 期批次一+批次二 CR-023~CR-030 已纳入；npm pack 58 文件验证通过）｜ 关联报告：`项目报告/第五期/`
+> 最新核对：2026-08-27（217 用例 216 通过 / 1 跳过（POSIX 0600）/ 0 失败；第 6 期批次三 CR-035 已纳入；批次一 CR-033 / 批次二 CR-034 保持）｜ 关联报告：`项目报告/第六期/`
 
 ---
 
@@ -23,7 +23,7 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
   → cli.ts（持续对话循环 / 全局 thatperson 命令）
       │
       ├─ 全局参数解析 parseArgs：--version/-V 输出即退出｜--help/-h｜--mock｜--input-file（UTF-8 剥 BOM）
-      ├─ 全局子命令（thatperson <cmd>）：status / setup / wizard / reset / present init|show / tools list / update / help / memory / session / config / skills
+      ├─ 全局子命令（thatperson <cmd>）：status / setup / wizard / reset / allow-dir / deny-dir / present init|show / tools list / update / help / memory / session / config / skills
       ├─ 对话内 / 前缀优先级：内部指令表（/help /history /clear /reset /exit /save /update）
       │     > Skill 斜杠（/<技能名>）> 未知提示（均不送 LLM）
       ├─ /名称 / 自然语言 ──→ skill.ts matchSkill（发现→激活→执行）
@@ -57,9 +57,11 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
             ├─ 执行器（tools/executor.ts，danger 默认禁用）── 工具调用链
             │     ├─ getTool 注册表校验（unknown-tool 拒绝）
 │     ├─ validateParams 参数校验 → assertPathAllowed 路径白名单（realpath 复检）→ handler → truncateResult(16000)
-            │     └─ 审计日志 logs/tool-*.jsonl（只记 argsKeys，不记参数值/Key）
+│     ├─ 失败统一升级结构化信封 {code/riskLevel/reason/unlockHint}（KS-35）；调用前合并 loadConfig().allowedDirs（KS-39 授权即时生效）
+            │     └─ 审计日志 logs/tool-*.jsonl（只记 argsKeys，不记参数值/Key；KS-38 补记 riskLevel + decision）
             │
-            └─ 循环控制：无 toolCalls → 完成；MAX_TOOL_ITERATIONS=12 硬上限（可配置）；连续失败 3 次认输
+            ├─ 循环控制：无 toolCalls → 完成；MAX_TOOL_ITERATIONS=12 硬上限（可配置）；连续失败 3 次 → 卡点诊断模板（第几步/等级/守卫/解锁，KS-36）
+            ├─ TTY 确认：非 --mock 且 stdin.isTTY 首次 path-denied 弹 y/N，批准临时入本轮白名单（KS-41）；非交互不弹不自动授权
                   └─ 工具结果以 {role:'tool'} 回灌 → 自动再调 chat()（回灌器，SEC-11 边界）
       │
       └─ 更新检查 checkForUpdates ［utils/update-check.ts］
@@ -80,8 +82,13 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
       ├─ 人设编辑（edit_present 工具）：「现在你的名字叫 XXX」→ present/identity.md 追加/替换（冲突拒绝覆盖）
       ├─ store.appendArchive(sectionOf(entry), entry) ［store.ts 写盘］
       │     └─ 写入前检查条目 ≥100 → compactArchiveFile 压缩
-      ├─ /save 快照 → history/sessions/session-<时间戳>.md（不覆盖同名）
-      └─ store.appendSessionLog(每日摘要) → history/session_logs/YYYY-MM-DD.md
+      ├─ /save 快照 → history/sessions/session-<时间戳>.md（frontmatter id/title/created_at/updated_at/summary + 既有正文格式，不覆盖同名；同秒冲突后缀递增）＋ index.json 登记（upsertSessionMeta，索引缺失先全量重建）
+      ├─ /list → listSessions（index.json 缺失/损坏全量扫描重建——可重建非唯一事实，快照文件才是唯一事实）→ id | title | 时间
+      ├─ /load <id> → loadSession（parseSnapshot 新/旧格式 → foldToRecovered 最近 8 条完整 + 更早折 summary）→ 覆盖 ctx.session.history/summary → 经 runLlmTurn 注入下一次 runAgentLoop（不改 loop.ts/chat.ts 主逻辑，KS-43）
+      ├─ /title <新标题> → titleSnapshot（改 frontmatter title + updated_at + 索引同步；LLM 精炼标题默认不做，KS-44）
+      ├─ thatperson export [--dir <目标>] → portable.ts exportMemory（history/present/skills 零依赖递归复制 + manifest.json 逐文件 sha256 校验和；config 只导出脱敏掩码，Key 永不明文，KS-45）
+      └─ thatperson import <导出目录> → portable.ts importMemory（校验 manifest 版本 + 校验和 → 仅合并记忆资产 history/present/skills；同名冲突先备份 history/backups/<时间戳>/ 再合并，永不导入 Key/config，KS-46）
+            └─ store.appendSessionLog(每日摘要) → history/session_logs/YYYY-MM-DD.md
 
 关键闭环：对话 → 解析 → 写记忆 → 下次按需注入
 ```
@@ -100,16 +107,19 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
 
 | 文件 | 职责 |
 | :--- | :--- |
-| `src/chat.ts` | 共享对话引擎：loadEnv / 四层注入 + 技能摘要层 + 工具清单层 / 检索增强（段落化）/ 调 DeepSeek（tools+tool_choice、model=config.model、Key=resolveApiKey）/ token 预算 / summary 折叠转义 / ChatResult{toolCalls} |
-| `src/agent/loop.ts` | ReAct 循环（第 5 期批次二）：解析（chat toolCalls）→ 执行（executeTool）→ 回灌（role='tool'）→ 再推理；MAX_TOOL_ITERATIONS=12（THATPERSON_MAX_TOOL_ITERATIONS 可调）；连续失败 3 次认输；审计日志 argsKeys |
-| `src/tools/types.ts` | 工具契约：ToolDef / ToolParams / ToolContext / ToolResult（第 5 期批次二新增） |
+| `src/chat.ts` | 共享对话引擎：loadEnv / 四层注入 + 技能摘要层 + 工具清单层 / 检索增强（段落化）/ 调 DeepSeek（tools+tool_choice、model=config.model、Key=resolveApiKey）/ token 预算 / summary 折叠转义 / ChatResult{toolCalls}；第 6 期批次二：recordTokenUsage 月度台账（logs/token-ledger-<YYYY-MM>.json）+ MONTHLY_TOKEN_TARGET + chat() 记账（真实 usage / estimateTokens 兜底 / mock 模拟值） |
+| `src/agent/loop.ts` | ReAct 循环（第 5 期批次二；第 6 期批次二升级）：解析（chat toolCalls）→ 执行（executeTool）→ 回灌（role='tool'）→ 再推理；MAX_TOOL_ITERATIONS=12（THATPERSON_MAX_TOOL_ITERATIONS 可调）；连续失败 3 次 → 卡点诊断模板（等级/守卫/解锁，消灭「我做不到」）；审计 argsKeys + riskLevel + decision；allowedRoots 合并 config.allowedDirs；TTY 首次越界弹 y/N 临时授权 |
+| `src/tools/types.ts` | 工具契约：ToolDef / ToolParams / ToolContext / ToolResult + RiskLevel（L0~L3）+ ToolFailure 结构化失败信封（第 5 期批次二新增，第 6 期批次二扩展） |
 | `src/tools/registry.ts` | 工具注册表白名单：registerTool / getTool / listTools / buildToolSpecs（第 5 期批次二新增） |
 | `src/tools/guards.ts` | 工具守卫：validateParams / assertPathAllowed（realpath 复检防符号链接逃逸）/ truncateResult（RESULT_CHAR_LIMIT=16000，THATPERSON_RESULT_CHAR_LIMIT 可调）（第 5 期批次二新增） |
-| `src/tools/executor.ts` | 工具执行器：注册检查 → danger 门控 → 参数校验 → handler → 截断；异常捕获不泄漏（第 5 期批次二新增） |
-| `src/tools/builtin.ts` | 内置 8 工具：list_directory/read_file/read_vault_note/search_vault/search_memory/append_memory/edit_present/run_shell（run_shell 需 THATPERSON_ENABLE_SHELL=true 才注册）（第 5 期批次二新增） |
-| `src/cli.ts` | 持续对话 CLI + 全局命令：parseArgs / 内部指令表 / 全局子命令（setup/wizard/reset/present/tools…）/ Skill 触发 / 跨轮模式 / 内容模式 / 归档落地 / 更新检查 / runAgentLoop 接线 |
+| `src/tools/executor.ts` | 工具执行器：注册检查 → danger 门控 → 参数校验 → handler → 截断；失败统一升级结构化信封 {code/riskLevel/reason/unlockHint}（KS-35）；调用前合并 loadConfig().allowedDirs（KS-39 授权即时生效）；异常捕获不泄漏（第 5 期批次二新增，第 6 期批次二升级） |
+| `src/tools/builtin.ts` | 内置工具唯一注册入口（第 5 期批次二新增，第 6 期批次一扩展）：BUILTIN_DEFS 静态白名单 = 既有 7 工具 + plugins 4 新工具（默认注册 11 个）；run_shell / web_search 单独环境变量门控（THATPERSON_ENABLE_SHELL / THATPERSON_ENABLE_WEB_SEARCH === 'true' 才注册） |
+| `src/tools/plugins/`（第 6 期批次一新增） | 插件化目录约定：**一文件一工具**，默认导出 `<name>Def` 常量；ToolDef 契约对齐 types.ts（params 字段、handler(args, ctx) 第二参 ctx 必收）；现有 `web-search.ts`（read 档·门控）/ `move-file.ts`（move_file + rename_file，renameSync 失败回退复制+删除）/ `create-directory.ts`（递归+幂等）/ `edit-vault-note.ts`（append/replace/frontmatter + 红线文件名拒绝） |
+| `src/cli.ts` | 持续对话 CLI + 全局命令：parseArgs / 内部指令表（/help /history /clear /reset /exit /save /list /load /title /update）/ 全局子命令（setup/wizard/reset/allow-dir/deny-dir/present/tools/export/import…）/ Skill 触发 / 跨轮模式 / 内容模式 / 归档落地 / 更新检查 / runAgentLoop 接线（history/summary 原样传入）；第 6 期批次三：saveSessionSnapshot frontmatter+index 登记、formatSessionList、/load 恢复注入、/title、export/import 全局指令 |
+| `src/session.ts`（第 6 期批次三新建） | 会话记录与恢复（KS-42~44）：`RecoveredSession{history,summary}` / `parseSnapshot`（`## 用户`/`## ThatPerson` 新格式 + `**用户**：` 旧格式兼容）/ `foldToRecovered`（最近 8 条完整 + 更早折 summary，summaryCharLimit=6000 二次折叠）/ `rebuildIndex`·`listSessions`·`upsertSessionMeta`（index.json 可重建非唯一事实）/ `loadSession` / `titleSnapshot`（frontmatter+索引同步）；`resolveSessionFile` id 参数拒绝 `/`、`\`、`..`（路径穿越防御） |
+| `src/portable.ts`（第 6 期批次三新建） | 记忆可携带 export/import（KS-45~46）：`exportMemory` 零依赖递归复制 history/present/skills + manifest.json（逐文件 sha256）/ `maskSecret`·`maskConfig`（config 只出掩码，Key 永不明文）/ `verifyManifest` 校验和复核 / `importMemory`（版本匹配+校验和 → resolveImportTarget 三根白名单 → 冲突先备份 history/backups/<时间戳>/ 再合并；SENSITIVE_ASSET_RE 跳过 config/.env/api-key，永不导入 Key） |
 | `src/index.ts` | 单次命令入口（`npm run dev|mock <问题>`）：一问一答 + 归档 + 当日摘要 |
-| `src/config.ts` | 全局配置：THATPERSON_HOME / 记忆目录三档定位 / config get-set（apiKey 白名单）/ disabledSkills / resolveApiKey（环境变量>config.json>.env）/ maskApiKey / isConfigured / resetConfig（仅保留 model+apiKey）/ model 唯一来源 |
+| `src/config.ts` | 全局配置：THATPERSON_HOME / 记忆目录三档定位 / config get-set（apiKey 白名单）/ disabledSkills / resolveApiKey（环境变量>config.json>.env）/ maskApiKey / isConfigured / resetConfig（保留 model+apiKey+allowedDirs）/ model 唯一来源；第 6 期批次二：allowedDirs 进 CONFIG_KEY_WHITELIST（set 不可写）+ allowDir/denyDir（绝对路径/无 `..`/存在目录/realpath 复检/幂等） |
 | `src/setup.ts` | 配置向导 runSetupWizard（第 5 期批次一新增）：inquirer password 掩码输入 Key，不打印不落日志；非交互入口不弹 |
 | `src/present.ts` | Present 元认知：主目录→随身目录→出厂级联、`<present>` 边界（自动加载 capabilities.md）、presentInit/presentShowText |
 | `src/skill.ts` | Skill 调用：扫描（主目录→随身→包内级联）/ 匹配（slash+auto）/ YAML 列表 trigger_keywords+tools / disabledSkills 过滤 / loadSkill 路径白名单 |
@@ -118,7 +128,7 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
 | `src/memory/store.ts` | 记忆存储：归档写入/读取/去重/衰减/合并/硬上限 |
 | `src/parser/archive.ts` | 对话归档解析（偏好/经历/日期/身份/跨轮模式/每日摘要），离线规则版；P0 否定前置/疑问过滤/不确定降级 + 第 5 期三闸（单句单条目/占位词黑名单/不确定不产经历）+ 内容模式 extractContentModeArchives |
 | `src/parser/llm-archive.ts` | LLM 语义归档（增强层，默认关闭）：独立 Key AAGENTDS_ARCHIVE_API_KEY + schema 校验 + insight 语义概括 + 同条去重 + mergeArchives 规则版兜底（第 4 期新增，第 5 期 M2 增强） |
-| `src/utils/ui.ts` | CLI 表现层 UI：logger / showBanner / showStatusCard / startSpinner / ask（第 4 期新增） |
+| `src/utils/ui.ts` | CLI 表现层 UI：logger / showBanner / showStatusCard（第 6 期批次二自动附加「本月已用 token / 目标进度」+ ≥80% 告警）/ startSpinner / ask（第 4 期新增） |
 | `src/utils/update-check.ts` | 更新自动检查：12h 缓存 / 跳过策略 / 静默失败 / 数字分段版本比较；REGISTRY_URL 对齐 scoped 包名（第 4 期新增，第 5 期对齐） |
 | `present/capabilities.md` | 能力清单（技能/CLI/记忆/边界，第 5 期中性化「个人管家」），经 loadPresent 自动注入 System |
 
@@ -126,21 +136,24 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
 
 ## 三、测试地图（测试 = 系统承诺的契约）
 
-> 全部离线、零 API。运行：`npm.cmd test`（Windows 下勿用 `npm.ps1`）。第 5 期全量 156 用例：155 通过 / 1 跳过（POSIX 0600）/ 0 失败。
+> 全部离线、零 API。运行：`npm.cmd test`（Windows 下勿用 `npm.ps1`）；e2e 单独跑 `node --test dist-test/tests/e2e/*.test.js`（先 `tsc -p tsconfig.test.json`）。第 6 期批次三全量 **217 用例：216 通过 / 1 跳过（POSIX 0600）/ 0 失败**；`tests/e2e/` 四闭环 4/4（--mock 全自动）。
 
 | 套件 | 守护承诺 | 数量 |
 | :--- | :--- | :--- |
 | `tests/parser.test.ts` | 归档解析正确性（偏好/经历/日期/身份/模式/摘要/空输入 + 第 5 期占位词/长文本） | 16 |
-| `tests/security.test.ts` | SEC-1~12 安全回归（注入/闭合/路径/Skill/静态卫生/离线/工具清单/tool_result/run_shell + 掩码/向导卫生/桥接） | 18 |
+| `tests/security.test.ts` | SEC-1~12 安全回归（注入/闭合/路径/Skill/静态卫生/离线/工具清单/tool_result/run_shell + 掩码/向导卫生/桥接）+ 批次二 SEC-b2（对话注入无法新增白名单 / allow-dir 参数注入拒绝 / unlockHint 不泄露路径 / 红线无解锁路径） | 22 |
 | `tests/fuzz.test.ts`（第 4 期新增） | FZ-1~5 载荷模糊（17 变体 × 写盘转义/四边界；FZ-4b 已闭环） | 6 |
 | `tests/badcases.test.ts` | BC-1~12 验收回归（话题劫持/token 预算/归档极性/假模式/压缩 + 第 4 期 P0 极性 + 第 5 期三闸/长文本） | 12 |
 | `tests/store.test.ts` | 记忆存储（目录/格式/合并/load/防穿越） | 6 |
-| `tests/chat.test.ts` | Present 加载 / System 组装 / 检索命中 / 技能摘要层 / 预算 / 先回应内容 | 12 |
-| `tests/config.test.ts` | 目录三档定位 / 项目模式判定 / 配置读写 / resolveApiKey / 掩码 / 0600 / reset | 16 |
+| `tests/chat.test.ts` | Present 加载 / System 组装 / 检索命中 / 技能摘要层 / 预算 / 先回应内容 + 批次二 token 台账（落盘/统计/80% 告警/mock 来源/自动记账） | 18 |
+| `tests/config.test.ts` | 目录三档定位 / 项目模式判定 / 配置读写 / resolveApiKey / 掩码 / 0600 / reset + 批次二 allowDir/denyDir（持久化/幂等/非法拒绝/对称移除/reset 保留） | 20 |
 | `tests/isolation.test.ts` | IS-1~3 测试与主程序隔离 | 3 |
-| `tests/cli.test.ts`（第 4 期新增） | CLI 参数解析 / 内部指令表 / 全局指令 / present/tools 指令 / status 真实数据 / 向导不弹分支 | 30 |
+| `tests/cli.test.ts`（第 4 期新增，第 6 期批次三追加） | CLI 参数解析 / 内部指令表 / 全局指令 / present/tools 指令 / status 真实数据 / 向导不弹分支 + 批次三：/save frontmatter + index.json 登记（KS-42）、export/import 子进程用例 | 33 |
 | `tests/update-check.test.ts`（第 4 期新增） | 12h 缓存 / force 绕过 / 404 与网络错误静默 / 版本对比 / scoped URL | 20 |
-| `tests/tools.test.ts`（第 5 期批次二新增） | 工具注册表白名单 / run_shell 门控 / 参数校验 / 路径穿越 / 截断 / loop 3 路径 / edit_present / append_memory / 桥接 | 17 |
+| `tests/tools.test.ts`（第 5 期批次二新增，第 6 期批次一/二追加） | 工具注册表白名单 / run_shell 门控 / 参数校验 / 路径穿越 / 截断 / loop 3 路径 / edit_present / append_memory / 桥接 + 批次一：新工具注册与参数契约 / web_search 门控·命中格式·截断 / move_file / rename_file / create_directory / edit_vault_note 三语义与红线 / 路径穿越全拒 + 批次二：结构化拒绝 6 场景 / riskLevel 标注 / allow-dir 闭环（同 ctx + loop mock）/ 分级话术 / KS-20 契约更新 | 41 |
+| `tests/session.test.ts`（第 6 期批次三） | 会话记录：parseSnapshot 新/旧格式 / foldToRecovered 折叠与截断 / rebuildIndex / listSessions 缺失·损坏重建一致 / loadSession 恢复前情 / titleSnapshot 双用例 / upsertSessionMeta（13 条，已接线进 cli.ts） | 13 |
+| `tests/portable.test.ts`（第 6 期批次三） | export/import 可携带：目录完整 / manifest 校验 / 无 apiKey 明文（新 SEC 断言）/ 冲突备份不覆盖 / 不导入 Key / 版本·校验和·缺 manifest 拒绝（isolateHome 隔离，7 条，已接线进 cli.ts） | 7 |
+| `tests/e2e/`（第 6 期批次三新建） | --mock 四闭环全自动：会话可恢复 / 记忆可带走 / 插件化跑通 / 拒绝不再认输（3 文件 4 用例；不并入全量 glob，单独运行） | 4（独立） |
 | `tests/helpers.ts` | isolateHome/snapshotTree 隔离工具（非测试） | — |
 
 **承诺速查**
@@ -167,6 +180,13 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
 - **SEC-10**（第 5 期）`<工具清单>` 静态不可注入：模型无法通过对话定义新工具
 - **SEC-11**（第 5 期）`<tool_result>` 边界闭合：工具结果只作 role=tool 消息，不进 system 指令区
 - **SEC-12**（第 5 期）run_shell 双门控：环境变量 THATPERSON_ENABLE_SHELL=true + 用户确认才放行
+- **KS-34**（第 6 期批次二）每个工具带 riskLevel（L0 只读 / L1 记忆写 / L2 文件写 / L3 命令执行），policy 与 riskLevel 并存
+- **KS-35**（第 6 期批次二）失败统一结构化信封 `{code/riskLevel/reason/unlockHint}`；红线项 unlockHint 为空（无解锁路径）
+- **KS-36**（第 6 期批次二）卡点诊断模板含步骤/等级/守卫/解锁动作，「我做不到」在分级场景消失
+- **KS-37**（第 6 期批次二）token 月度台账 `logs/token-ledger-<YYYY-MM>.json` + status「本月已用 token / 目标进度」+ ≥80% ⚠️ 告警
+- **KS-38**（第 6 期批次二）审计 `logs/tool-*.jsonl` 补记 riskLevel + decision（allowed/denied/reason/code），被拦清单可导出
+- **KS-39/40**（第 6 期批次二）allow-dir 持久化/幂等/非法拒绝 + 授权即时生效 + reset 保留；deny-dir 对称移除
+- **KS-41 / SEC-b2**（第 6 期批次二）TTY 首次越界弹 y/N 临时授权、非交互不弹不自动授权；对话注入无法新增白名单；allow-dir 参数注入（相对路径/`..`/符号链接）拒绝；unlockHint 不泄露路径/home 根
 - **KS-17/18/20/22**（第 5 期）工具注册表白名单 / 参数校验与路径穿越拒绝（realpath 复检）/ 截断 / loop 12 轮上限与认输 / edit_present 冲突拒绝 / append_memory 即时落盘
 - **FZ-1~5** 17 个注入载荷变体下：写盘转义、`<memory>`/`<检索命中>`/`<早前对话摘要>`/Skill 四边界不失效；FZ-4b 闭合标签经 summary 不得提前闭合（输入侧转义已闭环）
 - **IS-1~3** 测试重定向临时 home、真实 `~/.thatperson` 零变化、restore 干净
@@ -197,10 +217,17 @@ TypeScript + Node.js 24。核心引擎（记忆/解析/检索/对话/工具层�
 | `MAX_TOOL_ITERATIONS` | 12（THATPERSON_MAX_TOOL_ITERATIONS 可调） | ReAct 循环工具轮次硬上限（第 5 期批次二，防循环炸弹） |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | 连续失败阈值，达到即认输（第 5 期批次二） |
 | `RESULT_CHAR_LIMIT` | 16000（THATPERSON_RESULT_CHAR_LIMIT 可调） | 工具结果截断上限（第 5 期批次二） |
-| `MAX_SCAN_FILES` | 2000（THATPERSON_MAX_SCAN_FILES 可调） | 单次目录扫描文件数上限（第 5 期批次二，防递归炸弹） |
-| `MAX_FILE_MB` | 50（THATPERSON_MAX_FILE_MB 可调） | read/search 跳过超大数据文件的上限（第 5 期批次二） |
-| `MAX_SCAN_DEPTH` | 16（THATPERSON_MAX_SCAN_DEPTH 可调） | 目录扫描递归深度上限（第 5 期批次二） |
-| `TOOL_ALLOWED_ROOTS` | home / cwd / cwd/.thatperson / THATPERSON_VAULT_ROOT | 工具路径白名单（第 5 期批次二） |
+| `MAX_SCAN_FILES` | 2000（THATPERSON_MAX_SCAN_FILES 可调） | 单次目录扫描文件数上限（第 5 期批次二，防递归炸弹；第 6 期批次一 web_search 复用） |
+| `MAX_FILE_MB` | 50（THATPERSON_MAX_FILE_MB 可调） | read/search 跳过超大数据文件的上限（第 5 期批次二；第 6 期批次一 web_search 复用） |
+| `MAX_SCAN_DEPTH` | 16（THATPERSON_MAX_SCAN_DEPTH 可调） | 目录扫描递归深度上限（第 5 期批次二；第 6 期批次一 web_search 复用） |
+| `TOOL_ALLOWED_ROOTS` | home / cwd / cwd/.thatperson / THATPERSON_VAULT_ROOT / config.allowedDirs | 工具路径白名单（第 5 期批次二；第 6 期批次二 KS-39：loop/executor 双点合并 config.allowedDirs，授权即时生效） |
+| `THATPERSON_ENABLE_WEB_SEARCH` | 关（`'true'` 才注册） | web_search 插件化示例工具门控（第 6 期批次一，对齐 run_shell 先例；read 档，仅本地 .md 检索，零网络） |
+| `riskLevel`（第 6 期批次二） | `'L0' \| 'L1' \| 'L2' \| 'L3'` | L0 只读 / L1 写自身 home+present / L2 写白名单外部 / L3 命令执行；11 个可注册工具全部显式标注（types.ts ToolDef.riskLevel） |
+| `MONTHLY_TOKEN_TARGET` | 1_000_000（THATPERSON_MONTHLY_TOKEN_TARGET 可配） | 月度 token 目标；≥80% 触发 status ⚠️ 告警（KS-37） |
+| `PATH_DENIED_HINT` | 字面常量 | path-denied unlockHint：「该路径不在允许目录内；如需访问请运行 thatperson allow-dir <路径> 授权后重试」（不回显被拒路径/home 根） |
+| `DEFAULT_HISTORY_LIMIT` | 8（src/session.ts，对齐 cli.ts HISTORY_LIMIT） | /load 恢复保留最近 8 条 = 4 轮完整，更早折 summary（KS-43） |
+| `DEFAULT_SUMMARY_CHAR_LIMIT` | 6000（src/session.ts，对齐 chat.ts SUMMARY_CHAR_LIMIT） | 恢复摘要字符上限，超限二次折叠截断 |
+| `MANIFEST_VERSION` | `'1'`（src/portable.ts） | export 包 manifest 格式版本；import 版本不匹配拒绝（KS-45/46） |
 
 > ⚠️ 已消除的历史不一致：第 3 期 `config.model` 只作展示、请求走 `chat.ts` 硬编码 MODEL 的问题，已由 CR-018 统一（模型唯一来源）；第 5 期 Key 同源统一（CR-025，chat 不再直接读环境变量，改走 resolveApiKey）。
 
@@ -212,7 +239,8 @@ history/
 ├── timeline/           milestones.md · important_dates.md（日期层只取未来14天）
 ├── experiences/        journal.md
 ├── insights/           patterns.md
-├── sessions/           session-<时间戳>.md（/save 会话快照，第 4 期新增，不覆盖同名）
+├── sessions/           session-<时间戳>.md（/save 会话快照，第 4 期新增，不覆盖同名；第 6 期批次三加 frontmatter id/title/created_at/updated_at/summary）+ index.json（批次三新增：只做目录、可重建非唯一事实）
+├── backups/            import 冲突备份 <时间戳>/（第 6 期批次三新增：同名冲突先备份再合并，不静默覆盖）
 └── session_logs/       YYYY-MM-DD.md（load 取最近 7 天）
 ```
 
@@ -242,6 +270,11 @@ history/
 10. Key 同源与掩码（第 5 期）→ resolveApiKey 三来源（环境变量>config.json>.env）；config.json 0600 写盘；status/get apiKey 掩码回显；setup 向导 password 输入不打印不落日志
 11. 工具层守卫（第 5 期）→ 注册表白名单 / 参数 schema 校验 / 路径白名单 + realpath 复检 / 结果截断 / danger 双门控 / 审计日志只记 argsKeys
 12. 工具回灌边界（第 5 期）→ `<工具清单>` 静态生成不可注入（SEC-10）；工具结果只作 role=tool 消息（SEC-11）
+13. 插件化信任边界（第 6 期批次一）→ 无动态插件 import / eval / 热重载 / 沙箱（既有 await import 均为编译期常量路径）；工具仅经 builtin.ts 静态注册表可达（SEC-10 不后退）；写盘工具一律 sanitizeForMarkdown + `assertPathAllowed(rawPath, ctx.allowedRoots)`（第二参 ctx 必传，缺参按白名单失效）；新工具默认关闭、环境变量打开（web_search 对齐 run_shell 先例）
+14. 运行时路径授权（第 6 期批次二）→ 授权必须来自用户显式动作（allow-dir 命令或 TTY y/N 确认）；allowDir 五重校验（绝对路径 / 无 `..` 段 / 存在且为目录 / realpath 复检防符号链接逃逸 / 幂等）；对话注入无法新增白名单（SEC-b2）；`reset` 保留授权目录（BUCISHUI 拍板，与 apiKey/model 同级）
+15. 结构化拒绝与分级话术（第 6 期批次二）→ 失败信封 `{code/riskLevel/reason/unlockHint}` 回灌「为什么拒 + 解锁路径」；unlockHint 字面常量不回显被拒路径；红线项无解锁路径；卡点诊断模板消灭「我做不到」
+16. token 记账与审计升级（第 6 期批次二）→ 月度台账仅数字/ts/source（无 Key 无路径）；审计日志补记 riskLevel + decision，参数值/Key 零落盘；80% 用量告警
+17. 会话记录与记忆可携带（第 6 期批次三）→ /load//title 的 id 参数路径穿越防御（拒绝 `/`、`\`、`..`，仅文件名/索引/frontmatter 白名单解析）；index.json 可重建（快照文件才是唯一事实）；export config 只出掩码（Key 永不明文进包）；import 先校验 manifest（版本 + 逐文件 sha256）再合并、仅限 history/present/skills 三根、冲突先备份 history/backups/ 不静默覆盖、永不导入 config/.env/api-key 资产
 
 ---
 
@@ -254,9 +287,10 @@ history/
 | `npm.cmd run mock <问题>` | 单次问答（离线，零消耗） |
 | `npm.cmd run chat` | 持续对话 CLI |
 | `npm.cmd run chat:mock` | 持续对话 CLI（离线） |
-| `npm.cmd test` | 全量测试（156 用例：155 通过 / 1 跳过 POSIX 0600 / 0 失败） |
+| `npm.cmd test` | 全量测试（217 用例：216 通过 / 1 跳过 POSIX 0600 / 0 失败） |
+| `node --test dist-test/tests/e2e/*.test.js` | e2e 四闭环（--mock 全自动，先 `tsc -p tsconfig.test.json` 编译；4/4） |
 | `npm.cmd run report` | 生成第 N 期项目报告 |
-| `node dist/src/cli.js --version` | 输出版本即退出（第 4 期 P0 修复，当前 1.2.0） |
+| `node dist/src/cli.js --version` | 输出版本即退出（当前 1.3.0） |
 | `node dist/src/cli.js status` | 全局状态卡片（真实数据） |
 | `node dist/src/cli.js --help` | 内部 + 全局指令帮助 |
 | `node dist/src/cli.js setup` | 首次配置向导（掩码输入 Key） |
@@ -308,6 +342,9 @@ history/
 | CR-030 | 安全收口 SEC-10~12 + REGISTRY_URL 对齐 + 版本 1.2.0 | KS-23/24 + 第 5 期新发现 | 工具层红队全过；npm pack 58 文件；发布就绪 | 已批准 |
 | CR-031 | ReAct 回灌修复：assistant 消息携带 tool_calls | 真实 Key 实证触发 DeepSeek 400「role=tool 必须响应前一条 tool_calls」 | ChatMessage 增 toolCalls；buildChatMessages 序列化 tool_calls；loop 回灌配对 | 已批准 |
 | CR-032 | 限制可配置化「给 thatperson 自由」 | 用户反馈：项目文件普遍 >2MB 但 read 上限仅 2MB；token 预算 6000/4000 沿用早期规模；工具调用每轮仅 5 次，体验受限 | 默认值大幅上调：文件 2MB→50MB、结果截断 4000→16000、迭代 5→12、token 预算 6000/4000→16000/8000；全部限制经环境变量可调；保留连续失败 3 次认输保险丝 | 已批准 |
+| CR-033 | 第 6 期批次一·能力底座：插件化目录约定 + 集中注册 + 三新工具 + web_search 示例 + Skill 结构对齐 | 第六版提示词批次一（插件化轻量系统 / 三新工具 / Skill 面向大众推迟） | src/tools/plugins/ 一文件一工具（4 文件）；builtin.ts 唯一注册入口（cli.ts/chat.ts 零改动）；默认注册 11 工具；web_search 默认关；5 个 SKILL.md frontmatter 合规 + trigger 变体补齐；present/traits.md 出厂基线；测试 156→172 全绿 | 已批准 |
+| CR-034 | 第 6 期批次二·安全与权限：L0~L3 等级体系 + 结构化拒绝 + 分级话术 + token 台账 + 审计升级 + allow-dir/deny-dir + TTY 确认 + 注入防护 | 第六版提示词批次二（安全沙箱等级化 B-1~B-5 + 运行时路径授权 allow-dir） | types.ts 增 RiskLevel/ToolFailure 信封；executor buildFailure 结构化拒绝 + 合并 allowedDirs；loop 卡点诊断（消灭「我做不到」）+ 审计补记 riskLevel/decision + TTY 首次越界 y/N；chat.ts 月度 token 台账 + status 用量与 80% 告警；config.ts allowDir/denyDir（绝对路径/无 `..`/realpath 复检/幂等/reset 保留）；cli.ts 注册 allow-dir/deny-dir；SEC-b2 注入防护断言；测试 172→215 全绿 | 已批准 |
+| CR-035 | 第 6 期批次三·记忆主线：会话记录系统（/save frontmatter + index.json 可重建 + /list + /load 恢复 + /title）+ export/import 记忆可携带 + e2e 四闭环 + 总收口 1.3.0 | 第六版提示词批次三（记忆主线：会话记录 + 记忆可携带；KS-42~46） | src/session.ts 新建（RecoveredSession 契约 / parseSnapshot / foldToRecovered / 索引可重建 / loadSession / titleSnapshot）；src/portable.ts 新建（exportMemory 零依赖打包 + manifest sha256 / importMemory 校验+合并+冲突备份 / Key 永不明文不导入）；cli.ts 注册 /list /load /title /export /import；恢复注入 runAgentLoop（不改 loop/chat）；批次二遗留①安全等级对照表补入 chat.ts；tests/e2e/ 四闭环 4/4；测试 215→217 全绿；版本 1.3.0 + npm pack 核验 + Open→Done 2 份 | 已批准 |
 
 ---
 
@@ -319,10 +356,16 @@ history/
 | P2 | LLM 语义归档默认关闭 | THATPERSON_LLM_ARCHIVE=true 才启用；真实模型红队需独立测试 Key，离线仅验证边界 |
 | P3 | 检索为关键词+标签倒排+联想（非向量化） | 受核心逻辑零依赖约束，命中质量有限 |
 | P4 | Windows 控制台管道中文编码 | `--input-file`（UTF-8 剥 BOM）已覆盖文件场景；管道输入另行评估 |
-| P5 | 技能关键词精确匹配敏感 | 「优化一下提示词」等变体不触发 prompt-op（无 trigger_keywords，description 兜底部分命中）；建议后续补变体 |
+| P5 | 技能关键词精确匹配敏感 | ✅ 第 6 期批次一已闭环：5 个 SKILL.md 补齐 trigger_keywords 变体，隔离 home 实测 7 个遗留变体全部命中（用户级旧版 SKILL.md 优先覆盖出厂新变体，属级联设计语义） |
 | P6 | npm pack tarball 含 __pycache__/*.pyc 与历史遗留 dist/index.js（第 4 期延续） | 非功能问题，发布前建议评估清理（.npmignore/文件整理） |
 | P7 | 真实 Key 实证未执行（第 5 期完成定义） | 红线不消耗主 Key；实证步骤留给 BUCISHUI 手动执行（隔离 home + 独立测试 Key 优先） |
 | P8 | git 索引异常（src/config.ts D+??，index.lock 权限拒绝） | 本会话 .git 只读；需真实 git 环境 `git add -A` 归一；不提交、不 push |
+| P9 | Skill 面向大众推迟（第 6 期批次一决策） | BUCISHUI 拍板：待后端架构成熟后端到端设计，本期未做；`Skills生态相关` 备注衔接后续期次 |
+| P10 | web_search 为本地 .md 行检索（非联网） | 名称含「web」易误解；实现对齐 search_vault 白名单内检索、零网络；联网演进需网络白名单端点 + 超时评审 |
+| P11 | 用户级旧版 SKILL.md 覆盖出厂新 trigger 变体 | 级联语义（用户级>随身>出厂）为既定设计；新变体对已装用户级副本的用户不生效，建议后续评估「出厂升级提示」/版本比对 |
+| P12 | 「system 安全等级对照表」未注入（第 6 期批次二验收①半项） | ✅ 第 6 期批次三已闭环：buildSystemPrompt 追加 `<安全等级对照表>` 静态四行（L0 只读 / L1 写自身 / L2 写白名单外部 / L3 命令执行），chat.ts:642-649，常量生成无输入参与（SEC-10 不后退） |
+| P13 | 条件真实 Key 的 groWiki 实证未执行（第 6 期批次二/三条件项） | `AAGENTDS_API_KEY` 存在且端点可达（401 探测），但红线要求「测试 Key 与主 Key 分离 / 验证一律走 --mock」；记录「待 BUCISHUI 上线后手动验证」，不阻塞 |
+| P14 | /title LLM 精炼标题默认不做（KS-44 第三阶段可选） | 快照标题为规则截断（首条用户消息前 20 字），非语义精炼；--mock 跳过、留手动；可随时 `/title` 改 |
 
 ---
 

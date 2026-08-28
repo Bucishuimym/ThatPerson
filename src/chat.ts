@@ -5,11 +5,16 @@
  * - 3a 分层注入：画像层(≤1KB) + 日期层(未来14天) + 动态层(检索Top-K≤8) + 近期层(三行)；
  * - 3b 检索增强：标签倒排索引、话题联想表、停用词净化、检索源=本轮+最近2轮；
  * - 回复指令：只融入 ≤1 条与当前话题/情绪直接相关的记忆，杜绝全话题扫射。
+ *
+ * 第 6 期批次二 · KS-37（token 记账与月度台账）：
+ * - recordTokenUsage / getMonthlyTokenUsage 落盘 <home>/logs/token-ledger-<YYYY-MM>.json；
+ * - chat() 每次调用后记账：真实 API 优先取 response.usage，缺失用 estimateTokens 估算；--mock 记模拟小数值。
  */
+import fs from 'node:fs';
 import path from 'node:path';
 import type { ArchiveEntry, LoadedMemories, MemorySection } from './memory/types';
 import { buildPresentBlock } from './present';
-import { DEFAULT_MODEL, loadConfig, resolveApiKey } from './config';
+import { DEFAULT_MODEL, loadConfig, resolveApiKey, thatPersonHome } from './config';
 import { listSkills, type SkillInfo } from './skill';
 import { envInt } from './tools/guards';
 import type { ToolDef } from './tools/types';
@@ -43,8 +48,132 @@ export const SYSTEM_TOKEN_TARGET = envInt('THATPERSON_SYSTEM_TOKEN_TARGET', 8000
 export const SUMMARY_CHAR_LIMIT = envInt('THATPERSON_SUMMARY_CHAR_LIMIT', 6000);
 /** 技能摘要层字符预算（第 4 期 D-3b；5 个出厂技能一行一条远小于此值） */
 export const SKILLS_LAYER_BUDGET = 1600;
+/** 月度 token 目标（KS-37：THATPERSON_MONTHLY_TOKEN_TARGET 可配，默认 100 万；≥80% 触发告警） */
+export const MONTHLY_TOKEN_TARGET = envInt('THATPERSON_MONTHLY_TOKEN_TARGET', 1_000_000);
 /** 单条技能摘要行上限 */
 const SKILL_LINE_BUDGET = 140;
+
+// ===== 第 6 期批次二 · token 月度台账（KS-37） =====
+
+/** 台账单条记录（落盘格式：追加数组元素） */
+export interface TokenUsageRecord {
+  ts: string;
+  promptTokens: number;
+  completionTokens: number;
+  total: number;
+  source?: 'real' | 'mock';
+}
+
+/** recordTokenUsage 入参 */
+export interface TokenUsageInput {
+  promptTokens: number;
+  completionTokens: number;
+  month?: string;
+  source?: 'real' | 'mock';
+}
+
+/** getMonthlyTokenUsage 返回（月度汇总 + 明细） */
+export interface MonthlyTokenUsage {
+  month: string;
+  total: number;
+  promptTokens: number;
+  completionTokens: number;
+  mockTokens: number;
+  percent: number;
+  budget: number;
+  over80: boolean;
+  records: Array<{ total: number; source?: string }>;
+}
+
+/** 本地时区 YYYY-MM */
+function currentMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** 台账文件路径：<thatPersonHome()>/logs/token-ledger-<YYYY-MM>.json */
+function ledgerPath(month: string): string {
+  return path.join(thatPersonHome(), 'logs', `token-ledger-${month}.json`);
+}
+
+/** 读台账记录（缺失/损坏重建为空数组） */
+function readLedger(month: string): TokenUsageRecord[] {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(ledgerPath(month), 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (r): r is TokenUsageRecord =>
+        !!r &&
+        typeof r === 'object' &&
+        typeof (r as TokenUsageRecord).promptTokens === 'number' &&
+        typeof (r as TokenUsageRecord).completionTokens === 'number',
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 月度汇总（KS-37）：percent = total / budget；over80 = percent >= 0.8；mock 用量单独统计 */
+export function getMonthlyTokenUsage(month?: string): MonthlyTokenUsage {
+  const m = month ?? currentMonth();
+  const records = readLedger(m);
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let mockTokens = 0;
+  let total = 0;
+  for (const r of records) {
+    const p = Math.max(0, Number(r.promptTokens) || 0);
+    const c = Math.max(0, Number(r.completionTokens) || 0);
+    const t = Math.max(0, Number(r.total) || p + c);
+    promptTokens += p;
+    completionTokens += c;
+    total += t;
+    if (r.source === 'mock') mockTokens += t;
+  }
+  const budget = MONTHLY_TOKEN_TARGET;
+  const percent = budget > 0 ? total / budget : 0;
+  return {
+    month: m,
+    total,
+    promptTokens,
+    completionTokens,
+    mockTokens,
+    percent,
+    budget,
+    over80: percent >= 0.8,
+    records: records.map((r) => ({
+      total: Math.max(0, Number(r.total) || Number(r.promptTokens || 0) + Number(r.completionTokens || 0)),
+      source: r.source,
+    })),
+  };
+}
+
+/**
+ * 记录一次 token 用量（KS-37）：追加写入月度台账（损坏重建）；
+ * 落盘失败不阻塞对话（best-effort），over80 按写入后的月度汇总计算。
+ */
+export async function recordTokenUsage(opts: TokenUsageInput): Promise<{ ok: true; over80: boolean }> {
+  const month = opts.month ?? currentMonth();
+  const promptTokens = Math.max(0, Math.round(Number(opts.promptTokens) || 0));
+  const completionTokens = Math.max(0, Math.round(Number(opts.completionTokens) || 0));
+  const record: TokenUsageRecord = {
+    ts: new Date().toISOString(),
+    promptTokens,
+    completionTokens,
+    total: promptTokens + completionTokens,
+    source: opts.source ?? 'real',
+  };
+  try {
+    const file = ledgerPath(month);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const existing = readLedger(month);
+    existing.push(record);
+    fs.writeFileSync(file, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  } catch {
+    // 台账写盘失败不影响对话主流程
+  }
+  return { ok: true, over80: getMonthlyTokenUsage(month).over80 };
+}
 
 /** 加载项目根目录 .env（不覆盖已存在的系统环境变量） */
 export function loadEnv(): void {
@@ -510,6 +639,17 @@ export function buildSystemPrompt(
     }
   }
 
+  // 安全等级对照表（第 6 期批次二 KS-34/B-1）：宿主静态生成，一行一条；SEC-10 不后退
+  parts.push(
+    '<安全等级对照表>\n' +
+      '- L0 只读（允许目录内）\n' +
+      '- L1 写自身 home/present（追加记忆、编辑人设）\n' +
+      '- L2 写允许目录内的用户文件（移动/新建/编辑笔记）\n' +
+      '- L3 命令执行（默认禁用；需环境变量 + 用户逐次确认）\n' +
+      '</安全等级对照表>\n' +
+      '（安全等级由系统静态维护；工具被拦截时按卡点诊断说明解锁路径，不得绕过守卫或伪造工具。）',
+  );
+
   const memoryLayers: string[] = [];
   if (profileLayer) memoryLayers.push(`<画像层>\n${profileLayer}\n</画像层>`);
   if (dateLayer) memoryLayers.push(`<近期日程>\n${dateLayer}\n</近期日程>`);
@@ -596,6 +736,8 @@ export async function chat(
     throw new Error('未找到 API Key，请运行 thatperson setup 或 thatperson config set apiKey <Key>');
   }
   if (options.isMock) {
+    // KS-37：--mock 用模拟小数值记账（source='mock'），可离线回归
+    await recordTokenUsage({ promptTokens: 12, completionTokens: 8, source: 'mock' });
     return {
       content: `（离线演示，未调用 API）我在听～关于「${userPrompt}」，感觉你今天状态不错，可以多和我聊聊。`,
     };
@@ -665,6 +807,7 @@ export async function chat(
         tool_calls?: Array<{ id?: string; function: { name: string; arguments?: string } }>;
       };
     }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   };
   const message = data.choices[0]?.message;
   const content = message?.content ?? '';
@@ -675,5 +818,10 @@ export async function chat(
       name: tc.function.name,
       arguments: tc.function.arguments ?? '{}',
     }));
+  // KS-37：真实 API 记账——优先 response.usage，缺失用 estimateTokens 估算
+  const usage = data.usage;
+  const promptTokens = usage?.prompt_tokens ?? estimateTokens(JSON.stringify(messages));
+  const completionTokens = usage?.completion_tokens ?? estimateTokens(content);
+  await recordTokenUsage({ promptTokens, completionTokens, source: 'real' });
   return toolCalls.length > 0 ? { content, toolCalls } : { content };
 }

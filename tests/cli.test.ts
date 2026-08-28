@@ -23,6 +23,7 @@ import {
   configGetText,
   configSetText,
   sumArchiveEntries,
+  memorySearchText,
   type SessionState,
 } from '../src/cli';
 import type { ChatMessage } from '../src/chat';
@@ -108,6 +109,17 @@ test('parseArgs：未知参数被收集（未知 flag / 缺值的 --input-file�
   assert.deepEqual(b.unknownArgs, ['--input-file']);
 });
 
+test('parseArgs：--dir 透传到 commandArgs（export 用，不作为未知参数）', () => {
+  const a = parseArgs(['node', 'cli.js', 'export', '--dir', 'out/x']);
+  assert.equal(a.command, 'export');
+  assert.deepEqual(a.commandArgs, ['--dir', 'out/x']);
+  assert.deepEqual(a.unknownArgs, []);
+  const eq = parseArgs(['node', 'cli.js', 'export', '--dir=out/y']);
+  assert.deepEqual(eq.commandArgs, ['--dir=out/y']);
+  const missing = parseArgs(['node', 'cli.js', 'export', '--dir']);
+  assert.ok(missing.unknownArgs.includes('--dir'), '缺值的 --dir 应记为未知参数');
+});
+
 test('parseArgs：子命令与其参数', () => {
   const a = parseArgs(['node', 'cli.js', 'memory', 'stats']);
   assert.equal(a.command, 'memory');
@@ -172,6 +184,40 @@ test('saveSessionSnapshot：写入 history/sessions/ 且不覆盖同名文件', 
   assert.notEqual(file1, file2);
   assert.ok(fs.existsSync(file2));
   assert.equal(fs.readFileSync(file1, 'utf8'), before1, '已有快照内容不应被覆盖');
+});
+
+test('saveSessionSnapshot：frontmatter 头 + index.json 登记（KS-42）', () => {
+  const historyDir = path.join(tmpDir('thatperson-snap-fm-'), 'history');
+  const session = makeSession([['你好，我想聊传统拿铁', '好的，记住了']]);
+  session.summary = '早期摘要：喜欢传统拿铁';
+  const file = saveSessionSnapshot(session, historyDir);
+
+  const content = fs.readFileSync(file, 'utf8');
+  assert.match(content, /^---\nid: session_\d{8}_\d{6}\n/, '快照应以 frontmatter 开头且含 id');
+  assert.match(content, /^title: 你好，我想聊传统拿铁$/m, 'title 取首条用户消息前 20 字');
+  assert.match(content, /^created_at: .+T.+$/m, '应含 ISO created_at');
+  assert.match(content, /^updated_at: .+T.+$/m, '应含 ISO updated_at');
+  assert.match(content, /^summary: 早期摘要：喜欢传统拿铁$/m, '应含 summary');
+  assert.ok(content.includes('# 会话快照 · '), '既有正文格式应保留');
+  assert.ok(content.includes('**用户**：你好，我想聊传统拿铁'), '消息行断言不回归');
+
+  const indexPath = path.join(historyDir, 'sessions', 'index.json');
+  assert.ok(fs.existsSync(indexPath), 'index.json 应被创建');
+  const index = JSON.parse(fs.readFileSync(indexPath, 'utf8')) as {
+    version: number;
+    sessions: Array<{ id: string; title: string; created_at: string; file: string }>;
+  };
+  assert.equal(index.version, 1);
+  assert.equal(index.sessions.length, 1);
+  assert.equal(index.sessions[0].file, path.basename(file), '索引 file 应指向快照文件');
+  assert.match(index.sessions[0].id, /^session_\d{8}_\d{6}$/);
+
+  // 再次保存：索引 upsert 不重复，两个快照都在
+  const file2 = saveSessionSnapshot(session, historyDir);
+  const index2 = JSON.parse(fs.readFileSync(indexPath, 'utf8')) as { sessions: Array<{ id: string; file: string }> };
+  assert.equal(index2.sessions.length, 2, '同秒冲突时应各自登记，不重复覆盖');
+  const files = index2.sessions.map((s) => s.file);
+  assert.ok(files.includes(path.basename(file)) && files.includes(path.basename(file2)), '两个快照都应在索引中');
 });
 
 // ===== 指令-执行-返回（S-05）=====
@@ -303,12 +349,12 @@ test('configGetText / configSetText：apiKey 掩码回显且不泄漏明文（KS
   });
 });
 
-test('runGlobalCommand(reset)：仅保留 apiKey 与 model，清 disabledSkills 与 configured', async () => {
+test('runGlobalCommand(reset)：保留 apiKey/model/allowedDirs，清 disabledSkills、configured 置 false', async () => {
   await withTempHome(async () => {
     const { configPath } = ensureConfigDir();
     fs.writeFileSync(
       configPath,
-      JSON.stringify({ model: 'test-model', disabledSkills: ['code-op'], apiKey: 'sk-test1234abcd', configured: true }, null, 2),
+      JSON.stringify({ model: 'test-model', disabledSkills: ['code-op'], apiKey: 'sk-test1234abcd', configured: true, allowedDirs: ['D:\\granted-test'] }, null, 2),
       'utf8',
     );
     await withCapturedLog(() => runGlobalCommand('reset', []));
@@ -316,7 +362,8 @@ test('runGlobalCommand(reset)：仅保留 apiKey 与 model，清 disabledSkills 
     assert.equal(cfg.model, 'test-model');
     assert.equal(cfg.apiKey, 'sk-test1234abcd');
     assert.equal(cfg.disabledSkills, undefined, 'reset 后应清除 disabledSkills');
-    assert.equal(cfg.configured, undefined, 'reset 后应清除 configured 标记');
+    assert.equal(cfg.configured, false, 'reset 后显式写 configured:false（批次二契约）');
+    assert.ok(Array.isArray(cfg.allowedDirs) && cfg.allowedDirs.includes('D:\\granted-test'), 'reset 后应保留 allowedDirs');
   });
 });
 
@@ -337,6 +384,40 @@ test('runGlobalCommand(present init/show)：模板落盘不覆盖既有文件（
     // present show 输出当前生效人格
     const showLogs = await withCapturedLog(() => runGlobalCommand('present', ['show']));
     assert.ok(showLogs.join('\n').length > 0);
+  });
+});
+
+test('runGlobalCommand(export/import)：导出包生成 → 新 home 导入 → memory search 命中（KS-45/KS-46）', async () => {
+  let pkgRoot = '';
+  // 源 home：造记忆资产并导出
+  await withTempHome(async () => {
+    const home = process.env.THATPERSON_HOME as string;
+    fs.mkdirSync(path.join(home, 'history', 'profile'), { recursive: true });
+    fs.mkdirSync(path.join(home, 'present'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'history', 'profile', 'preferences.md'), '## 偏好\n传统拿铁\n', 'utf8');
+    fs.writeFileSync(path.join(home, 'present', 'identity.md'), '# 身份\n热爱编程\n', 'utf8');
+    const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-exp-out-'));
+    const logs = await withCapturedLog(() => runGlobalCommand('export', ['--dir', outDir]));
+    const out = logs.join('\n');
+    assert.ok(out.includes('已导出记忆到'), `应输出导出目录，实际：${out}`);
+    assert.ok(!out.includes('apiKey'), '导出输出不得打印 Key 字段');
+    const pkg = fs.readdirSync(outDir).find((d) => d.startsWith('thatperson-export-'));
+    assert.ok(pkg, '应生成 thatperson-export-<时间戳> 包');
+    pkgRoot = path.join(outDir, pkg as string);
+    assert.ok(fs.existsSync(path.join(pkgRoot, 'manifest.json')), '应含 manifest.json');
+  });
+  assert.ok(pkgRoot, '前置：导出成功');
+  // 新 home：导入并检索
+  await withTempHome(async () => {
+    const logs = await withCapturedLog(() => runGlobalCommand('import', [pkgRoot]));
+    const out = logs.join('\n');
+    assert.ok(out.includes('已导入'), `应打印导入数，实际：${out}`);
+    const home = process.env.THATPERSON_HOME as string;
+    assert.ok(fs.existsSync(path.join(home, 'history', 'profile', 'preferences.md')), '导入后记忆文件应存在');
+    assert.ok(
+      memorySearchText(path.join(home, 'history'), '拿铁').includes('拿铁'),
+      'import 后 memory search 应命中',
+    );
   });
 });
 

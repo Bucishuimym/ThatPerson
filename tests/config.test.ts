@@ -81,6 +81,122 @@ test('memoryRoot：随身目录（cwd/.thatperson 存在）优先，否则回退
   }
 });
 
+// ===== 第 6 期批次二 · allow-dir 授权持久化（D-4 测试先行，红态契约；allowDir/denyDir 尚未实现，经命名空间断言调用） =====
+import * as configB2Module from '../src/config';
+
+type B2DirResult = { ok: true } | { ok: false; error: string };
+const configB2 = configB2Module as unknown as {
+  allowDir(dir: string): B2DirResult;
+  denyDir(dir: string): B2DirResult;
+};
+
+/** 读 config.json 落盘内容（批次二契约：allowedDirs 持久化） */
+function readConfigOnDisk(): Record<string, unknown> {
+  return JSON.parse(fs.readFileSync(path.join(iso.home, 'config.json'), 'utf8')) as Record<string, unknown>;
+}
+
+function allowedDirsOnDisk(): string[] {
+  const raw = readConfigOnDisk().allowedDirs;
+  return Array.isArray(raw) ? raw.filter((d): d is string => typeof d === 'string') : [];
+}
+
+/** 清理 allowedDirs（直接写盘，不依赖 denyDir 当前是否实现） */
+function resetConfigFile(): void {
+  fs.writeFileSync(
+    path.join(iso.home, 'config.json'),
+    `${JSON.stringify({ model: 'deepseek-v4-flash', disabledSkills: [], configured: false }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+test('第6期批次二 allowDir：授权真实目录并持久化，重复添加幂等', () => {
+  const dir = makeTmpRoot();
+  try {
+    assert.equal(configB2.allowDir(dir).ok, true, '首次授权应成功');
+    assert.equal(configB2.allowDir(dir).ok, true, '重复授权应成功（幂等）');
+    const dirs = allowedDirsOnDisk();
+    assert.ok(dirs.includes(path.resolve(dir)), 'allowedDirs 应包含已授权目录');
+    assert.equal(
+      dirs.filter((d) => path.resolve(d) === path.resolve(dir)).length,
+      1,
+      '重复添加不得产生重复条目',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetConfigFile();
+  }
+});
+
+test('第6期批次二 allowDir：相对路径/不存在/非目录/含 .. 注入一律拒绝', () => {
+  const root = makeTmpRoot();
+  const file = path.join(root, 'a.txt');
+  fs.writeFileSync(file, 'x', 'utf8');
+  fs.mkdirSync(path.join(root, 'sub'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'escape'), { recursive: true });
+  const rel = 'relative-dir';
+  const missing = path.join(root, 'no-such-dir');
+  const dotdot = `${root}${path.sep}sub${path.sep}..${path.sep}escape`; // 含 .. 段的原始输入，必须拒绝（path.join 会折叠，需保留字面 ..）
+  try {
+    for (const bad of [rel, missing, file, dotdot]) {
+      const res = configB2.allowDir(bad);
+      assert.equal(res.ok, false, `非法路径应拒绝：${bad}`);
+      if (!res.ok) assert.ok(res.error.length > 0, '拒绝应带原因');
+    }
+    assert.equal(allowedDirsOnDisk().length, 0, '非法路径不得写入 allowedDirs');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    resetConfigFile();
+  }
+});
+
+test('第6期批次二 denyDir：对称移除授权，保留其余授权，重复移除幂等', () => {
+  const a = makeTmpRoot();
+  const b = makeTmpRoot();
+  try {
+    assert.equal(configB2.allowDir(a).ok, true);
+    assert.equal(configB2.allowDir(b).ok, true);
+    assert.equal(allowedDirsOnDisk().length, 2);
+    assert.equal(configB2.denyDir(a).ok, true, 'denyDir 应成功移除');
+    const dirs = allowedDirsOnDisk();
+    assert.ok(dirs.includes(path.resolve(b)), '移除后其余授权应保留');
+    assert.ok(!dirs.includes(path.resolve(a)), '被移除目录不应再出现');
+    assert.equal(configB2.denyDir(a).ok, true, '重复移除应幂等');
+    assert.equal(configB2.denyDir(path.join(a, 'ghost')).ok, true, '移除未授权目录应幂等成功');
+  } finally {
+    fs.rmSync(a, { recursive: true, force: true });
+    fs.rmSync(b, { recursive: true, force: true });
+    resetConfigFile();
+  }
+});
+
+test('第6期批次二 resetConfig：保留 allowedDirs（disabledSkills 清理、configured 置 false）', () => {
+  const home = makeTmpRoot();
+  const savedHome = process.env.THATPERSON_HOME;
+  process.env.THATPERSON_HOME = home;
+  try {
+    ensureConfigDir();
+    const dir = makeTmpRoot();
+    try {
+      assert.equal(configB2.allowDir(dir).ok, true);
+      assert.equal(setConfigValue('disabledSkills', 'code-op,prompt-op').ok, true);
+      assert.equal(setConfigValue('apiKey', 'sk-reset-b2-abcdef').ok, true);
+      const res = resetConfig();
+      assert.equal(res.ok, true);
+      const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')) as Record<string, unknown>;
+      assert.ok(Array.isArray(onDisk.allowedDirs), 'reset 后 allowedDirs 应保留');
+      assert.ok((onDisk.allowedDirs as string[]).includes(path.resolve(dir)), '授权目录应保留');
+      assert.equal(onDisk.apiKey, 'sk-reset-b2-abcdef', 'apiKey 应保留');
+      assert.equal(onDisk.configured, false, 'configured 应置 false');
+      assert.equal(onDisk.disabledSkills, undefined, 'disabledSkills 应被清理');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env.THATPERSON_HOME;
+    else process.env.THATPERSON_HOME = savedHome;
+  }
+});
+
 
 // ===== 第 4 期（D-3b）：config get/set 与 skills 启停 =====
 
@@ -113,7 +229,8 @@ test('config set：非法 key 与空值拒绝', () => {
   assert.ok(CONFIG_KEY_WHITELIST.includes('model'));
   assert.ok(CONFIG_KEY_WHITELIST.includes('disabledSkills'));
   assert.ok(CONFIG_KEY_WHITELIST.includes('apiKey'));
-  assert.equal(CONFIG_KEY_WHITELIST.length, 3, '白名单应含 model / disabledSkills / apiKey');
+  assert.ok(CONFIG_KEY_WHITELIST.includes('allowedDirs'), '白名单应含 allowedDirs（第 6 期批次二）');
+  assert.ok(CONFIG_KEY_WHITELIST.length >= 4, '白名单应含 model / disabledSkills / apiKey / allowedDirs');
   const badKey = setConfigValue('secret', 'some-value');
   if (badKey.ok) assert.fail('非法 key 应拒绝');
   else assert.match(badKey.error, /不支持的配置键/);
@@ -251,7 +368,7 @@ test('第5期：config.json 首次创建含 configured:false，写入 apiKey 后
   }
 });
 
-test('第5期：resetConfig 仅保留 model 与 apiKey（清 disabledSkills、configured 置 false）', () => {
+test('第5期：resetConfig 保留 model/apiKey/allowedDirs，清 disabledSkills、configured 置 false', () => {
   const home = makeTmpRoot();
   const savedHome = process.env.THATPERSON_HOME;
   process.env.THATPERSON_HOME = home;
@@ -260,12 +377,17 @@ test('第5期：resetConfig 仅保留 model 与 apiKey（清 disabledSkills、co
     setConfigValue('disabledSkills', 'code-op,prompt-op');
     setConfigValue('apiKey', 'sk-reset-abcdef12');
     setConfigValue('model', 'deepseek-chat');
+    const granted = makeTmpRoot();
+    assert.equal(configB2.allowDir(granted).ok, true, '授权目录应成功');
     const res = resetConfig();
     assert.equal(res.ok, true);
     const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
-    assert.deepEqual(Object.keys(onDisk).sort(), ['apiKey', 'model'], 'reset 后仅保留 model+apiKey');
+    fs.rmSync(granted, { recursive: true, force: true });
     assert.equal(onDisk.model, 'deepseek-chat');
     assert.equal(onDisk.apiKey, 'sk-reset-abcdef12');
+    assert.ok(Array.isArray(onDisk.allowedDirs) && onDisk.allowedDirs.includes(path.resolve(granted)), 'reset 后应保留 allowedDirs');
+    assert.equal(onDisk.configured, false, 'reset 后显式写 configured:false');
+    assert.equal(onDisk.disabledSkills, undefined, 'reset 后应清除 disabledSkills');
     assert.equal(isConfigured(), false, 'reset 后 configured 缺省为 false');
   } finally {
     if (savedHome === undefined) delete process.env.THATPERSON_HOME;

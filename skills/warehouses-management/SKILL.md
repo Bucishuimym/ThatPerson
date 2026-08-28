@@ -26,6 +26,9 @@ trigger_keywords:
   - reorganize files
   - move files
   - organize notes
+  - organize my vault
+  - tidy up my notes
+  - file organization
   - declutter
   - categorize
 version: "1.2"
