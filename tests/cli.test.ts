@@ -475,3 +475,61 @@ test('子进程：node cli.js --help 打印内部 + 全局帮助后退出', asyn
   assert.ok(stdout.includes('/help'));
   assert.ok(stdout.includes('status'));
 });
+
+// ===== 批次二：web / open 全局指令解析层（KS-7.26 / T6·T8，指令接线前红）=====
+
+test('parseArgs：web 指令 --port/--no-open 透传到 commandArgs（不记为未知参数）', () => {
+  const a = parseArgs(['node', 'cli.js', 'web', '--port', '4321', '--no-open']);
+  assert.equal(a.command, 'web');
+  assert.deepEqual(a.commandArgs, ['--port', '4321', '--no-open']);
+  assert.deepEqual(a.unknownArgs, []);
+  const b = parseArgs(['node', 'cli.js', 'web']);
+  assert.equal(b.command, 'web');
+  assert.deepEqual(b.commandArgs, []);
+  const eq = parseArgs(['node', 'cli.js', 'web', '--port=4321']);
+  assert.deepEqual(eq.commandArgs, ['--port=4321']);
+  assert.deepEqual(eq.unknownArgs, []);
+  const missing = parseArgs(['node', 'cli.js', 'web', '--port']);
+  assert.ok(missing.unknownArgs.includes('--port'), '缺值的 --port 应记为未知参数');
+});
+
+test('parseArgs：open 指令取目录参数', () => {
+  const a = parseArgs(['node', 'cli.js', 'open', 'D:\\notes']);
+  assert.equal(a.command, 'open');
+  assert.deepEqual(a.commandArgs, ['D:\\notes']);
+  assert.deepEqual(a.unknownArgs, []);
+});
+
+test('runGlobalCommand(open)：合法目录授权成功（退出码 0 且 allowedDirs 持久化）', async () => {
+  await withTempHome(async () => {
+    ensureConfigDir();
+    const dir = tmpDir('thatperson-open-ok-');
+    let code = -1;
+    const logs = await withCapturedLog(async () => {
+      code = await runGlobalCommand('open', [dir]);
+    });
+    assert.equal(code, 0, `open 合法目录应返回 0，实际 ${code}；输出：${logs.join('\n')}`);
+    const cfgPath = path.join(process.env.THATPERSON_HOME as string, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { allowedDirs?: string[] };
+    assert.ok(
+      Array.isArray(cfg.allowedDirs) && cfg.allowedDirs.some((d) => path.resolve(d) === path.resolve(dir)),
+      'open 应复用 allowDir 持久化授权到 allowedDirs',
+    );
+  });
+});
+
+test('runGlobalCommand(open)：目录不存在拒绝（退出码 1 且不写入 allowedDirs）', async () => {
+  await withTempHome(async () => {
+    ensureConfigDir();
+    const bogus = path.join(os.tmpdir(), `thatperson-open-missing-${Date.now()}`);
+    let code = -1;
+    await withCapturedLog(async () => {
+      code = await runGlobalCommand('open', [bogus]);
+    });
+    assert.equal(code, 1, '不存在的目录应拒绝（退出码 1）');
+    const cfgPath = path.join(process.env.THATPERSON_HOME as string, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { allowedDirs?: string[] };
+    const added = Array.isArray(cfg.allowedDirs) && cfg.allowedDirs.some((d) => path.resolve(d) === path.resolve(bogus));
+    assert.ok(!added, '拒绝时不得写入 allowedDirs');
+  });
+});
