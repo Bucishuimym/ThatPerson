@@ -41,6 +41,9 @@ trigger_keywords:
   - token budget
 version: 1.1
 author: BUCISHUI
+metadata:
+  source: thatperson-factory
+  compatibility: thatperson >= 1.3
 ---
 
 

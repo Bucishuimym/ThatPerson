@@ -1,5 +1,5 @@
 /**
- * 内置工具白名单（第 5 期批次二 · KS-17/KS-18/KS-22；第 6 期批次一 · 插件化底座；第 6 期批次二 · KS-34 riskLevel 标注）
+ * 内置工具白名单（第 5 期批次二 · KS-17/KS-18/KS-22；第 6 期批次一 · 插件化底座；第 6 期批次二 · KS-34 riskLevel 标注；第 7 期批次一 · KS-7.7~7.12 三新工具）
  *
  * 首批 8 工具：
  * - read：list_directory / read_file / read_vault_note / search_vault / search_memory
@@ -8,9 +8,15 @@
  *
  * 第 6 期批次一追加（src/tools/plugins/）：
  * - write：move_file / rename_file / create_directory / edit_vault_note（恒注册）
- * - read：web_search（默认不注册，THATPERSON_ENABLE_WEB_SEARCH=true 才注册）
  *
- * 全部 node:fs / node:path / node:child_process 原生实现，零第三方依赖；
+ * 第 7 期批次一追加（KS-7.7~7.12）：
+ * - write：write_file（恒注册，KS-7.7）
+ * - read：vault_search（原 web_search 本地 .md 搜索改名让位，KS-7.12；默认不注册，
+ *   THATPERSON_ENABLE_WEB_SEARCH=true 才注册，沿用原门控 DD-7.5）
+ * - read：web_search（真 DDG 搜索）/ web_fetch（抓网页转文本）——默认不注册，
+ *   THATPERSON_ENABLE_WEB=true 才注册（KS-7.9/7.10）
+ *
+ * 全部 node:fs / node:path / node:child_process / 全局 fetch 原生实现，零第三方依赖；
  * 写入一律经过 sanitize 与路径白名单，search_memory 自实现，不依赖 chat.ts（避免循环依赖）。
  */
 import fs from 'node:fs';
@@ -19,7 +25,9 @@ import { execFile } from 'node:child_process';
 import { assertPathAllowed, envInt } from './guards';
 import { registerTool } from './registry';
 import type { ToolContext, ToolDef, ToolHandlerResult } from './types';
-import { webSearchDef } from './plugins/web-search';
+import { vaultSearchDef, webSearchDef } from './plugins/web-search';
+import { webFetchDef } from './plugins/web-fetch';
+import { writeFileDef } from './plugins/write-file';
 import { moveFileDef, renameFileDef } from './plugins/move-file';
 import { createDirectoryDef } from './plugins/create-directory';
 import { editVaultNoteDef } from './plugins/edit-vault-note';
@@ -450,7 +458,7 @@ const runShellDef: ToolDef = {
   },
 };
 
-/** 内置工具定义（run_shell / web_search 不在其中，单独按环境变量门控注册） */
+/** 内置工具定义（run_shell / vault_search / web_search / web_fetch 不在其中，单独按环境变量门控注册） */
 const BUILTIN_DEFS: ToolDef[] = [
   listDirectoryDef,
   readFileDef,
@@ -463,12 +471,15 @@ const BUILTIN_DEFS: ToolDef[] = [
   renameFileDef,
   createDirectoryDef,
   editVaultNoteDef,
+  writeFileDef,
 ];
 
 /**
  * 注册全部内置工具并返回已注册工具名列表。
- * run_shell / web_search 默认不注册：仅当对应环境变量 === 'true' 时注册；
+ * run_shell / vault_search / web_search / web_fetch 默认不注册：仅当对应环境变量 === 'true' 时注册；
  * run_shell 即使注册，executor 在 dangerAllowed=false（ReAct 循环）下仍返回 danger-disabled（双门控）。
+ * web_search + web_fetch 同受 THATPERSON_ENABLE_WEB 门控（KS-7.9/7.10）；
+ * vault_search 沿用原 THATPERSON_ENABLE_WEB_SEARCH 门控（KS-7.12 / DD-7.5，旧名让位真上网）。
  */
 export function registerBuiltins(): string[] {
   const names: string[] = [];
@@ -481,8 +492,14 @@ export function registerBuiltins(): string[] {
     names.push(runShellDef.name);
   }
   if (process.env.THATPERSON_ENABLE_WEB_SEARCH === 'true') {
+    registerTool(vaultSearchDef);
+    names.push(vaultSearchDef.name);
+  }
+  if (process.env.THATPERSON_ENABLE_WEB === 'true') {
     registerTool(webSearchDef);
     names.push(webSearchDef.name);
+    registerTool(webFetchDef);
+    names.push(webFetchDef.name);
   }
   return names;
 }

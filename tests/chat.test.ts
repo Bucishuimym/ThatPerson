@@ -291,3 +291,79 @@ test('第6期批次二 token 台账：mock 对话自动记录模拟用量', asyn
     else process.env.AAGENTDS_API_KEY = saved;
   }
 });
+
+// ===== 第 7 期批次一 · 技能事件对齐（task 4；KS-7.20~7.21）=====
+// 发射点在 cli.processInput（技能命中 → skill_start，技能上下文注入 → skill_step）；
+// 接线由 task 2/4 实现方完成，接线前发射断言先红；消费示例（总线 + NDJSON 往返）先行可绿。
+import { spawn } from 'node:child_process';
+import { emitEvent, subscribeEventSink, clearEventSinks, type AgentEvent } from '../src/events';
+
+test('第7期 技能事件消费示例：skill_start/skill_step 经总线装配 seq/ts，NDJSON 往返无损', () => {
+  const received: AgentEvent[] = [];
+  subscribeEventSink((e) => received.push(e));
+  try {
+    emitEvent({ type: 'skill_start', name: 'prompt-op' });
+    emitEvent({ type: 'skill_step', name: 'prompt-op', step: 'context-inject' });
+  } finally {
+    clearEventSinks();
+  }
+  assert.equal(received.length, 2, 'sink 应收到 2 个技能事件');
+  const [start, step] = received;
+  assert.equal(start.type, 'skill_start');
+  assert.equal((start as { name: string }).name, 'prompt-op');
+  assert.equal(step.type, 'skill_step');
+  assert.equal((step as { name: string; step: string }).name, 'prompt-op');
+  assert.equal((step as { name: string; step: string }).step, 'context-inject');
+  assert.ok(step.seq > start.seq, 'seq 应单调递增');
+  const round = received.map((e) => JSON.stringify(e)).join('\n').split('\n').map((l) => JSON.parse(l) as AgentEvent);
+  assert.deepEqual(round, received, 'NDJSON 往返无损');
+});
+
+/** spawn dist CLI（--mock + --events + --input-file），等待退出（离线：--mock 不发网络） */
+async function runCliForEvents(cwd: string, eventsFile: string, input: string): Promise<void> {
+  const cliPath = path.resolve(__dirname, '..', '..', 'dist', 'src', 'cli.js');
+  if (!fs.existsSync(cliPath)) {
+    throw new Error(`dist/src/cli.js 不存在，请先 npm run build（实际查找：${cliPath}）`);
+  }
+  const inputFile = path.join(cwd, 'input.txt');
+  fs.writeFileSync(inputFile, input, 'utf8');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, '--mock', '--events', eventsFile, '--input-file', inputFile], {
+      cwd,
+      env: { ...process.env, THATPERSON_HOME: iso.home },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    const timer = setTimeout(() => child.kill(), 30_000);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+test('第7期 技能事件发射：技能命中 → --events 文件含 skill_start/skill_step（CLI 接线前先红）', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'thatperson-skillev-'));
+  const eventsFile = path.join(root, 'events.ndjson');
+  try {
+    // 「优化一下提示词」命中 prompt-op 的 trigger_keywords（auto 路径）
+    await runCliForEvents(root, eventsFile, '请帮我优化一下提示词，让它更简洁专业');
+    assert.ok(fs.existsSync(eventsFile), '--events NDJSON 文件应生成（CLI 事件接线未完成 → 红）');
+    const events = fs
+      .readFileSync(eventsFile, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as AgentEvent);
+    const start = events.find((e) => e.type === 'skill_start');
+    assert.ok(start, '技能命中应发射 skill_start');
+    if (start) assert.equal((start as { name: string }).name, 'prompt-op');
+    const step = events.find((e) => e.type === 'skill_step');
+    assert.ok(step, '技能上下文注入应发射 skill_step');
+    if (step) assert.equal((step as { name: string }).name, 'prompt-op');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -523,3 +523,92 @@ test('SEC-b2 红线项无解锁路径：redline-denied 不带 unlockHint', async
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ===== 第 7 期批次一 · SKILL.md frontmatter 合规（KS-7.20）+ SEC-5 全量回归（task 4）=====
+
+/** 5 个出厂技能目录名（包内 skills/） */
+const FACTORY_SKILLS = ['code-op', 'industry-analysis', 'prompt-op', 'vault-api-bridge', 'warehouses-management'];
+
+interface SkillFrontmatter {
+  name: string;
+  description: string;
+  triggerKeywords: string[];
+  version?: string;
+  author?: string;
+  hasMetadata: boolean;
+  metadataInline: string;
+  body: string;
+}
+
+/** 解析包内 SKILL.md frontmatter（支持多行 YAML 列表与 metadata 嵌套块），并返回正文 */
+function readFactorySkillFrontmatter(skillName: string): SkillFrontmatter {
+  const skillPath = path.resolve(__dirname, '..', '..', 'skills', skillName, 'SKILL.md');
+  const content = fs.readFileSync(skillPath, 'utf8');
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+  assert.ok(m, `${skillName}: SKILL.md 应有 frontmatter 块`);
+  const fm: SkillFrontmatter = {
+    name: '',
+    description: '',
+    triggerKeywords: [],
+    hasMetadata: false,
+    metadataInline: '',
+    body: content.slice(m![0].length),
+  };
+  let listKey = '';
+  for (const line of m![1].split(/\r?\n/)) {
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    if (item && listKey) {
+      const value = item[1].trim().replace(/^['"]|['"]$/g, '');
+      if (listKey === 'trigger_keywords' && value) fm.triggerKeywords.push(value);
+      if (listKey === 'metadata') fm.hasMetadata = true;
+      continue;
+    }
+    const idx = line.indexOf(':');
+    if (idx <= 0) {
+      listKey = '';
+      continue;
+    }
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (key === 'name') fm.name = value.toLowerCase();
+    if (key === 'description') fm.description = value;
+    if (key === 'version') fm.version = value;
+    if (key === 'author') fm.author = value;
+    if (key === 'metadata') {
+      fm.hasMetadata = true;
+      fm.metadataInline = value;
+    }
+    listKey = value === '' ? key : '';
+  }
+  return fm;
+}
+
+test('第7期 SKILL.md 合规：5 个出厂技能 frontmatter 结构齐备（name kebab-case / 触发场景 / trigger_keywords / version / author / metadata）', () => {
+  for (const skillName of FACTORY_SKILLS) {
+    const fm = readFactorySkillFrontmatter(skillName);
+    assert.ok(/^[a-z0-9]+(-[a-z0-9]+)*$/.test(fm.name), `${skillName}: name 应为小写 kebab-case，实际 ${fm.name}`);
+    assert.ok(fm.description.trim().length > 0, `${skillName}: description 应非空`);
+    assert.ok(fm.description.includes('触发场景'), `${skillName}: description 应含触发场景说明`);
+    assert.ok(fm.triggerKeywords.length > 0, `${skillName}: trigger_keywords 应为非空数组`);
+    assert.ok(fm.version !== undefined && fm.version.trim() !== '', `${skillName}: 应声明 version`);
+    assert.ok(fm.author !== undefined && fm.author.trim() !== '', `${skillName}: 应声明 author`);
+    assert.ok(fm.hasMetadata, `${skillName}: 应声明 metadata 键（当前出厂 SKILL.md 全部缺失 → 红，待补齐）`);
+  }
+});
+
+test('第7期 SEC-5 回归：5 个出厂 SKILL.md 正文均不进入 System Prompt（摘要层只含描述/触发词）', () => {
+  const sys = buildSystemPrompt({ profile: {}, importantDates: null, patterns: null, recentSessions: [] });
+  for (const skillName of FACTORY_SKILLS) {
+    const skill = loadSkill(skillName);
+    assert.ok(skill, `应能加载出厂技能：${skillName}`);
+    if (!skill) continue;
+    // 指纹取 frontmatter 之外的正文行（description 属于摘要层允许范围，正文不允许）
+    const bodyLines = skill.content
+      .replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
+      .split(/\r?\n/)
+      .filter((l) => l.trim().length >= 10);
+    assert.ok(bodyLines.length > 0, `${skillName}: 正文应有可取指纹的行`);
+    const fingerprint = bodyLines.reduce((a, b) => (b.length > a.length ? b : a), '');
+    assert.ok(!sys.includes(fingerprint), `${skillName}: SKILL.md 正文不得进入 System（SEC-5）：${fingerprint.slice(0, 40)}…`);
+  }
+});

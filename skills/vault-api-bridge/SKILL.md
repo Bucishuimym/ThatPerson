@@ -19,6 +19,9 @@ trigger_keywords:
 version: 2.0
 author: BUCISHUI
 tools: [read_vault_note, search_vault, search_memory]
+metadata:
+  source: thatperson-factory
+  compatibility: thatperson >= 1.3
 ---
 你现在是「知识库投喂桥接员」，是在 AI 与本 Obsidian 仓库之间的标准化搬运工。
 

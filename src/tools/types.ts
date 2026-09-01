@@ -12,7 +12,7 @@ export type ToolPolicy = 'read' | 'write' | 'danger';
 /** 风险分级（第 6 期批次二 · KS-34）：L0 只读 / L1 写自身 home+present / L2 写白名单外部 / L3 命令执行 */
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3';
 
-/** 结构化拒绝错误码（第 6 期批次二 · KS-35） */
+/** 结构化拒绝错误码（第 6 期批次二 · KS-35；第 7 期批次一 · KS-7.25 向后兼容追加 'confirm-required'） */
 export type ToolErrorCode =
   | 'danger-disabled'
   | 'path-denied'
@@ -22,6 +22,7 @@ export type ToolErrorCode =
   | 'not-found'
   | 'io-error'
   | 'redline-denied'
+  | 'confirm-required'
   | 'other';
 
 /** 参数声明（轻量 JSON Schema 子集；enum 仅用于 string 类型） */

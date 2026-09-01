@@ -33,6 +33,9 @@ trigger_keywords:
   - categorize
 version: "1.2"
 author: BUCISHUI
+metadata:
+  source: thatperson-factory
+  compatibility: thatperson >= 1.3
 ---
 
 你现在是「专业仓库管理员」。

@@ -20,6 +20,9 @@ export interface ExecuteToolOptions {
 const PATH_DENIED_HINT = '该路径不在允许目录内；如需访问请运行 thatperson allow-dir <路径> 授权后重试';
 /** L3 命令执行解锁提示（KS-36） */
 const DANGER_DISABLED_HINT = '高危操作，需你：① 设 THATPERSON_ENABLE_SHELL=true ② 逐次确认；也可先做静态检查由你手动执行';
+/** 写确认闸解锁提示（第 7 期 KS-7.25：不含任何路径/home 根） */
+export const CONFIRM_REQUIRED_HINT =
+  '在交互终端重试并在提示时确认；或改为单文件操作';
 
 /** 兜底风险等级：未标注时 danger 按 L3、其余按 L0 */
 function riskOf(def: { policy: string; riskLevel?: RiskLevel }): RiskLevel {
@@ -63,6 +66,17 @@ function buildFailure(error: string, riskLevel: RiskLevel): ToolFailure {
   }
   if (e.startsWith('redline-denied')) {
     return { ok: false, error: e, code: 'redline-denied', riskLevel, reason: '该文件为敏感红线文件，永远拒绝编辑', unlockHint: '' };
+  }
+  if (e.startsWith('confirm-required')) {
+    // 第 7 期 KS-7.25：写确认闸拒绝（批量/结构性写未获用户确认）；unlockHint 不含任何路径
+    return {
+      ok: false,
+      error: e,
+      code: 'confirm-required',
+      riskLevel,
+      reason: '需要用户确认的写操作未获确认',
+      unlockHint: CONFIRM_REQUIRED_HINT,
+    };
   }
   if (e.startsWith('conflict')) {
     return { ok: false, error: e, code: 'conflict', riskLevel, reason: '目标已存在，拒绝覆盖', unlockHint: '可用 append 追加，或先移除旧文件后再试' };

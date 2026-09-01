@@ -13,6 +13,7 @@ import path from 'node:path';
 import { runAgentLoop } from '../../src/agent/loop';
 import { registerBuiltins } from '../../src/tools/builtin';
 import { isolateHome } from '../helpers';
+import { installConfirmStub } from '../mocks';
 
 const iso = isolateHome();
 test.after(() => iso.restore());
@@ -51,6 +52,8 @@ test('插件化跑通：move_file 经 runAgentLoop --mock 真实执行', async (
     [{ id: 'call_move', name: 'move_file', arguments: JSON.stringify({ source: src, targetDir }) }],
     [],
   ]);
+  // DD-7.2：结构性写确认语义下注入自动确认桩（move 目标在 cwd=home 外 → 单次确认），四闭环不变
+  const confirm = installConfirmStub(true);
   try {
     const result = await withCwd(root, () =>
       runAgentLoop({ userPrompt: '把 a.txt 移到 sub', memories: EMPTY_MEMORIES, isMock: true }),
@@ -62,6 +65,7 @@ test('插件化跑通：move_file 经 runAgentLoop --mock 真实执行', async (
     assert.ok(!fs.existsSync(src), '源文件应已移走');
     assert.ok(result.reply.includes('（离线演示）'), `回复应为离线摘要，实际：${result.reply}`);
   } finally {
+    confirm.restore(); // 测试后清理确认桩
     delete process.env.THATPERSON_MOCK_TOOL_CALLS;
   }
 });

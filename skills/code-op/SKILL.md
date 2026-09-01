@@ -27,6 +27,9 @@ trigger_keywords:
   - make this code better
 version: 1.0
 author: BUCISHUI
+metadata:
+  source: thatperson-factory
+  compatibility: thatperson >= 1.3
 ---
 
 你现在是「专业代码优化工程师」。
