@@ -169,3 +169,26 @@ test('占位词黑名单：「我喜欢做事情」「我喜欢这种感觉」�
     );
   }
 });
+
+// ===== 批次三 S-7：农历日期归桶（T11b 归档质量；当前「正月初六」被误归「月初」→ 红态锚点）=====
+
+test('S-7 农历日期：「农历正月初六是我的生日」归「农历正月初六」，不误归「月初」', () => {
+  const archives = extractArchives('农历正月初六是我的生日，记得提前提醒我。', '');
+  const dates = archives.filter((a) => a.type === '日期');
+  assert.ok(dates.length >= 1, '应提取日期条目');
+  const lunar = dates.find((a) => a.insight.includes('农历正月初六'));
+  assert.ok(
+    lunar,
+    `日期字段（时间口径）应含「农历正月初六」，实际：${dates.map((d) => d.insight).join(' / ')}`,
+  );
+  for (const d of dates) {
+    // O-1 最小适配（D-3b，待追认）：「农历正月初六」必然含子串「月初」（正·月初·六），
+    // 原断言 !includes('月初') 与上一行 includes('农历正月初六') 逻辑上不可同时满足；
+    // 按「不得把「正月初六」误归「月初」时间桶」的断言意图，收窄为旧误判口径「（月初）」——
+    // 旧误判产出「生日（月初）」仍然红，农历原句式归档转绿。
+    assert.ok(
+      !d.insight.includes('（月初）'),
+      `不得把「正月初六」误归「月初」时间桶，实际：${d.insight}`,
+    );
+  }
+});

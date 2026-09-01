@@ -1,0 +1,173 @@
+{
+  "generatedAt": "2026-08-30T17:57:23.332Z",
+  "engine": "retrieveRelevant（现状两级瀑布：标签先到先得 + 词法子串包含）@ dist/src/chat.js",
+  "source": "tests/fixtures/retrieval-golden.json",
+  "totalQuestions": 12,
+  "hitCount": 12,
+  "hitRate": 1,
+  "criteria": "单题 hit = expectKeywords 全部出现在检索返回文本中（含命中行裁剪后的文本）",
+  "perItem": [
+    {
+      "id": "G-01",
+      "category": "罕见词命中",
+      "question": "我之前在哪个旧书市集淘到过绝版诗集？",
+      "expected": [
+        "市集",
+        "绝版诗集"
+      ],
+      "found": [
+        "市集",
+        "绝版诗集"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-02",
+      "category": "罕见词 vs 常见词干扰",
+      "question": "我平时喜欢读什么样的诗集？",
+      "expected": [
+        "绝版诗集"
+      ],
+      "found": [
+        "绝版诗集"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-03",
+      "category": "时间近因",
+      "question": "最近一次爬山去了哪里？",
+      "expected": [
+        "莫干山"
+      ],
+      "found": [
+        "莫干山"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-04",
+      "category": "置信度分层",
+      "question": "我坚持的运动是什么？",
+      "expected": [
+        "夜游"
+      ],
+      "found": [
+        "夜游"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-05",
+      "category": "标签命中",
+      "question": "帮我看看我记过哪些 #陶艺 相关的事？",
+      "expected": [
+        "陶艺"
+      ],
+      "found": [
+        "陶艺"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-06",
+      "category": "多主题（宠物+咖啡）",
+      "question": "我想带芝麻去宠物咖啡馆，合适吗？",
+      "expected": [
+        "芝麻",
+        "咖啡"
+      ],
+      "found": [
+        "芝麻",
+        "咖啡"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-07",
+      "category": "画像身份",
+      "question": "我的职业是什么来着？",
+      "expected": [
+        "插画师"
+      ],
+      "found": [
+        "插画师"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-08",
+      "category": "农历日期",
+      "question": "我的农历生日是哪天？",
+      "expected": [
+        "正月初六"
+      ],
+      "found": [
+        "正月初六"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-09",
+      "category": "近期会话",
+      "question": "陶艺试听课定在哪天？",
+      "expected": [
+        "试听课"
+      ],
+      "found": [
+        "试听课"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-10",
+      "category": "旧事回溯",
+      "question": "我之前爬佘山是什么时候的事？",
+      "expected": [
+        "佘山"
+      ],
+      "found": [
+        "佘山"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-11",
+      "category": "模式洞察",
+      "question": "我最近熬夜是不是有点频繁？",
+      "expected": [
+        "熬夜"
+      ],
+      "found": [
+        "熬夜"
+      ],
+      "missing": [],
+      "hit": true
+    },
+    {
+      "id": "G-12",
+      "category": "罕见词+多主题（咖啡因/拿铁）",
+      "question": "咖啡因敏感的人能喝拿铁吗？",
+      "expected": [
+        "咖啡因",
+        "拿铁"
+      ],
+      "found": [
+        "咖啡因",
+        "拿铁"
+      ],
+      "missing": [],
+      "hit": true
+    }
+  ]
+}

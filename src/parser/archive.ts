@@ -7,6 +7,10 @@
  * - 补全感受词表：松弛/治愈/解压/痛快/上头/舒畅/尽兴/安心/踏实/过瘾 等。
  * - 假模式消除：单条消息不再产出「模式」；改为跨 ≥2 轮/天的 `detectCrossTurnPatterns`。
  *
+ * 第 7 期批次三（T11b · S-5/S-7）：
+ * - assistantText 死参修复：回复纳入解析（同一套规则，source:'dialog'，与 userText 去重合并）；
+ * - 日期归桶补农历句式：农历正月初六/腊月廿三等记原句式，不再误归「月初」。
+ *
  * 仍为离线规则版，不调用任何 API，不消耗 Key。
  */
 
@@ -436,8 +440,22 @@ function extractExperiences(userText: string): ArchiveEntry[] {
 
 // ===== 日期提取 =====
 
-const DATE_TIME_HINTS = /\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}号|\d{1,2}月|\d{1,2}日|下(?:周|个)(?:一|二|三|四|五|六|日|天)|这(?:周|个)(?:一|二|三|四|五|六|日|天)|周末|下周|这周|下个月|这个月|后天|明天|大后天|年底|月初|月底|几号/;
-const DATE_SPECIFIC = /\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}号|下(?:周|个)(?:一|二|三|四|五|六|日|天)|这(?:周|个)(?:一|二|三|四|五|六|日|天)|明天|后天|大后天/;
+/**
+ * 农历句式（第 7 期批次三 T11b · S-7）：「农历正月初六」「正月初六」「腊月廿三」「正月十五」等
+ * （正月/腊月/冬月 + 初X/廿X/十X/中文数字日）。归档记原句式，**不得误归「月初」桶**——
+ * 旧规则 DATE_TIME_HINTS 的「月初」分支会把「正月初六」里的「月初」子串误判为时间口径。
+ * 农历分支置于时间口径候选首位（最左优先），命中后「月初」不再参与该子句匹配。
+ */
+const LUNAR_DATE_SOURCE = String.raw`(?:农(?:历)?)?[正一二三四五六七八九十冬腊]月(?:初[一二三四五六七八九十]|廿[一二三四五六七八九十]?|十[一二三四五六七八九]?|[一二三四五六七八九十]{1,3})`;
+
+const DATE_TIME_HINTS = new RegExp(
+  LUNAR_DATE_SOURCE +
+    String.raw`|\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}号|\d{1,2}月|\d{1,2}日|下(?:周|个)(?:一|二|三|四|五|六|日|天)|这(?:周|个)(?:一|二|三|四|五|六|日|天)|周末|下周|这周|下个月|这个月|后天|明天|大后天|年底|月初|月底|几号`,
+);
+const DATE_SPECIFIC = new RegExp(
+  LUNAR_DATE_SOURCE +
+    String.raw`|\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}号|下(?:周|个)(?:一|二|三|四|五|六|日|天)|这(?:周|个)(?:一|二|三|四|五|六|日|天)|明天|后天|大后天`,
+);
 
 /** 从用户文本提取日期条目 */
 function extractDates(userText: string): ArchiveEntry[] {
@@ -548,13 +566,14 @@ export function detectCrossTurnPatterns(userTexts: string[]): ArchiveEntry[] {
 
 // ===== 对外主函数 =====
 
-/**
- * 从本轮对话提取归档条目（离线规则版，不调用任何 API）。
- * 单条消息不产出「模式」；跨轮模式请调用 detectCrossTurnPatterns。
- */
-export function extractArchives(userText: string, assistantText: string): ArchiveEntry[] {
-  const text = (userText || '').trim();
-  if (text.length === 0) return [];
+/** 带 source 标注的归档条目（第 7 期批次三 T11b）：dialog=对话自述（userText/回复）；file=文件内容抽提。
+ *  ArchiveEntry 的可选增量字段，缺省视为 dialog（向后兼容既有消费方）。 */
+export interface SourceTaggedArchiveEntry extends ArchiveEntry {
+  source?: 'dialog' | 'file';
+}
+
+/** 单文本归档管线（原 extractArchives 主体）：偏好/经历/日期/身份 + 条内去重 */
+function extractFromText(text: string): ArchiveEntry[] {
   const prefs = extractPrefs(text);
   detectConflicts(prefs);
   const entries: ArchiveEntry[] = [];
@@ -563,6 +582,38 @@ export function extractArchives(userText: string, assistantText: string): Archiv
   entries.push(...extractDates(text));
   entries.push(...extractIdentities(text));
   return dedupe(entries);
+}
+
+/** type+提炼信息相似判重（T11b S-5 去重合并口径）：同类型且提炼互为包含视为同一条 */
+function similarInsight(a: ArchiveEntry, b: ArchiveEntry): boolean {
+  if (a.type !== b.type) return false;
+  const x = a.insight.trim();
+  const y = b.insight.trim();
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+/**
+ * 从本轮对话提取归档条目（离线规则版，不调用任何 API）。
+ * 第 7 期批次三 T11b · S-5：assistantText 纳入解析（修复死参）——对回复跑同一套
+ * 偏好/身份/经历/日期规则，产出条目标注 source:'dialog'，并与 userText 条目
+ * 按（type+提炼信息相似）去重合并；回复中的问句（「那我们改天去吃火锅吧」类）不归档
+ * （既有疑问语气词/否定前置守卫同样作用于回复文本）。
+ * 单条消息不产出「模式」；跨轮模式请调用 detectCrossTurnPatterns。
+ */
+export function extractArchives(userText: string, assistantText: string): SourceTaggedArchiveEntry[] {
+  const entries: SourceTaggedArchiveEntry[] = [];
+  // userText 在前（用户原话优先保留），assistantText 回复在后纳入解析
+  for (const text of [userText, assistantText]) {
+    const t = (text || '').trim();
+    if (!t) continue;
+    for (const entry of extractFromText(t)) {
+      // 跨文本去重：userText 与 assistantText 的重复陈述只留一条
+      if (entries.some((prev) => similarInsight(prev, entry))) continue;
+      entries.push({ ...entry, source: 'dialog' });
+    }
+  }
+  return entries;
 }
 
 // ===== 长文本内容模式（KS-4） =====

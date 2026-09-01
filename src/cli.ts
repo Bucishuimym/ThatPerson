@@ -10,13 +10,19 @@
  * - S-06 能力自省行为化：Skill 触发不再打印 SKILL.md 原文，改一行摘要 + 内部注入 LLM；
  * - S-07/S-08 更新检查：启动异步 checkForUpdates，12h 缓存落 thatPersonHome()，全部失败静默；
  * - S-09/S-10 UI 接入：showBanner 启动一次、status 卡片接真实数据；
- * - S-14 LLM 语义归档：llmExtractArchives/mergeArchives 动态接线，缺失/出错降级规则版。
+ * - S-14 LLM 语义归档：llmExtractArchives/mergeArchives 动态接线，缺失/出错降级规则版；
+ * 第 7 期批次三（T11b / T10 / T11 · D-3b）：
+ * - T11b 提议式沉淀接线：读类工具结果 → proposeFromTurn 提案卡 → 确认四级（桩/mock/TTY/非交互）→ applyProposals；
+ * - T11b 会话摘要聚合：/save 快照增会话摘要（多轮精炼）+ 工具活动统计（路径无全文）+ 归档清单 + 读过但未沉淀提示；
+ * - T11b 进程韧性：main 顶部 process.on(unhandledRejection/uncaughtException) 卡点诊断兜底，REPL 永不裸退；
+ * - T11 生产态蒸馏装配：非 mock 且有 Key 时 __setDistillImpl 接生产纯文本补全实现；
+ * - T10：事件 vaultId 由 loop 发射（见 src/agent/loop.ts），CLI 消费忽略该字段。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { chat, loadEnv, sectionOf, today, foldSummary, SYSTEM_TOKEN_BUDGET, type ChatMessage } from './chat';
+import { chat, loadEnv, sectionOf, today, foldSummary, SYSTEM_TOKEN_BUDGET, BASE_URL, chatTimeoutMs, estimateTokens, type ChatMessage } from './chat';
 import { loadPresent, presentInit, presentShowText } from './present';
 import { createMemoryStore, countArchiveEntries, compactMemoryFile } from './memory/store';
 import {
@@ -26,6 +32,7 @@ import {
   SECTION_FILES,
 } from './memory/types';
 import { extractArchives, buildSessionSummary, detectCrossTurnPatterns, extractContentModeArchives } from './parser/archive';
+import { proposeFromTurn, confirmAndApply, type SedimentProposal } from './sediment';
 import {
   allowDir,
   denyDir,
@@ -50,6 +57,9 @@ import {
 } from './config';
 import { runSetupWizard } from './setup';
 import { runAgentLoop } from './agent/loop';
+import { emitEvent, subscribeEventSink } from './events';
+import { ensureParaVault } from './vault';
+import { startWebServer } from './web/server';
 import { listSessions, loadSession, titleSnapshot, upsertSessionMeta } from './session';
 import { exportMemory, importMemory } from './portable';
 import { listTools } from './tools/registry';
@@ -57,6 +67,7 @@ import { registerBuiltins } from './tools/builtin';
 import { listSkills, matchSkill, type SkillInfo } from './skill';
 import { logger, showBanner, showStatusCard } from './utils/ui';
 import { checkForUpdates, readCurrentVersion, shouldSkipUpdateCheck } from './utils/update-check';
+import { __setDistillImpl } from './retrieval';
 
 const EXIT_CMDS = new Set(['exit', 'quit', '退出', '再见']);
 /** 超过该条数后开始折叠最早轮次（保留最近 4 轮 = 8 条） */
@@ -79,15 +90,30 @@ function escapeTags(text: string): string {
 
 // ===== 会话状态 =====
 
+/** 本会话工具活动条目（T11b：快照工具统计段用；只记 tool/target/ok/sedimented，不存内容全文） */
+export interface ToolActivityEntry {
+  tool: string;
+  target: string;
+  ok: boolean;
+  /** 是否已沉淀入档（读过但未沉淀 → 快照显式提示「可让我整理提案」） */
+  sedimented: boolean;
+}
+
 export interface SessionState {
   history: ChatMessage[];
   summary: string;
   recentUserTexts: string[];
+  /** 本会话工具活动（T11b 摘要聚合）：读过/改过的目标位置，无全文 */
+  toolActivity?: ToolActivityEntry[];
+  /** 本会话已归档条目（「类型 | 提炼」）清单：快照「归档清单」段用 */
+  archivedInsights?: string[];
 }
 
 export interface ParsedArgs {
   isMock: boolean;
   inputFile: string | null;
+  /** --events <file|->：NDJSON 事件 sink（file=追加写文件；-=stderr；缺省=无 sink 输出等价） */
+  eventsSink: string | null;
   /** 全局子命令（positional[0]），如 status / update */
   command: string | null;
   commandArgs: string[];
@@ -103,6 +129,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const out: ParsedArgs = {
     isMock: false,
     inputFile: null,
+    eventsSink: null,
     command: null,
     commandArgs: [],
     showVersion: false,
@@ -128,6 +155,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (a.startsWith('--input-file=')) {
       out.inputFile = a.slice('--input-file='.length);
+    } else if (a === '--events') {
+      // 会话事件协议（KS-7.4）：--events <file|->；'-' 合法（写 stderr），其余 '-' 开头视为缺值
+      const value = args[i + 1];
+      if (value && (!value.startsWith('-') || value === '-')) {
+        out.eventsSink = value;
+        i += 1;
+      } else {
+        out.unknownArgs.push(a);
+      }
+    } else if (a.startsWith('--events=')) {
+      out.eventsSink = a.slice('--events='.length) || null;
     } else if (a === '--dir') {
       // 全局指令参数透传（thatperson export [--dir <目标路径>]）：原样进入 commandArgs
       const value = args[i + 1];
@@ -138,6 +176,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
         out.unknownArgs.push(a);
       }
     } else if (a.startsWith('--dir=')) {
+      positional.push(a);
+    } else if (a === '--port') {
+      // 全局指令参数透传（thatperson web [--port <n>]）：与 --dir 同口径，值随 commandArgs 交由子命令解析
+      const value = args[i + 1];
+      if (value && !value.startsWith('-')) {
+        positional.push(a, value);
+        i += 1;
+      } else {
+        out.unknownArgs.push(a);
+      }
+    } else if (a.startsWith('--port=')) {
+      positional.push(a);
+    } else if (a === '--no-open') {
+      // 全局指令参数透传（thatperson web --no-open）：无值开关，原样进入 commandArgs
       positional.push(a);
     } else if (a.startsWith('-')) {
       out.unknownArgs.push(a);
@@ -162,6 +214,7 @@ export function formatHelp(): string {
     '  thatperson                     进入持续对话模式',
     '  thatperson --mock              离线演示模式（不调用 API、不发网络）',
     '  thatperson --input-file <path> 从文件读入指令（UTF-8，单次对话后退出）',
+    '  thatperson --events <file|->   会话事件 NDJSON sink（file 追加写 / - 走 stderr；缺省无 sink）',
     '  thatperson --version / -V      输出版本号后退出',
     '  thatperson --help / -h         显示本帮助后退出',
     '',
@@ -173,6 +226,8 @@ export function formatHelp(): string {
     '  reset       重置配置（仅保留 apiKey 与 model；--keep-present 保留 present 覆盖）',
     '  allow-dir <绝对路径>  授权目录加入白名单（授权后即时生效，可持久化）',
     '  deny-dir <绝对路径>   从白名单移除授权目录（幂等）',
+    '  open <绝对路径>       把目录作为仓库打开（复用 allow-dir 持久化授权，thatperson web 可浏览）',
+    '  web [--port <n>] [--no-open]  启动本地 web 工作台（只绑 127.0.0.1；--no-open 不自动开浏览器）',
     '  present init  生成出厂人格模板到主目录 present/（不覆盖既有文件）',
     '  present show  查看当前生效人格',
     '  tools list    列出已注册工具（read/write/danger）',
@@ -222,11 +277,13 @@ export function formatHistory(history: ChatMessage[]): string {
   return lines.join('\n');
 }
 
-/** /reset：清空历史 / 摘要 / 近期输入三处（S-02，不落盘） */
+/** /reset：清空历史 / 摘要 / 近期输入三处（S-02，不落盘）；T11b 工具活动与归档清单一并清空 */
 export function resetSession(session: SessionState): void {
   session.history.length = 0;
   session.summary = '';
   session.recentUserTexts.length = 0;
+  if (session.toolActivity) session.toolActivity.length = 0;
+  if (session.archivedInsights) session.archivedInsights.length = 0;
 }
 
 /** 快照标题：首条用户消息前 20 字（中文按句末标点截断，对齐参考实现）；无用户消息回退「未命名会话」 */
@@ -245,6 +302,70 @@ function snapshotSummary(summary: string): string {
   const s = (summary ?? '').replace(/\r?\n/g, ' ');
   if (s.length <= 200) return s;
   return `${s.slice(0, 199)}…`;
+}
+
+/** 摘要行截断（多轮精炼每轮一行，超长省略；完整原文见「对话记录」段） */
+function digestClip(text: string, max = 60): string {
+  const t = (text ?? '').replace(/\s+/g, ' ').trim();
+  return t.length <= max ? t : `${t.slice(0, max)}…`;
+}
+
+/** 读类工具集合（T11b 工具统计段口径；与 loop.ts/sediment.ts 一致） */
+const READ_CLASS_TOOLS = new Set(['read_file', 'read_vault_note', 'search_vault', 'search_memory', 'vault_search']);
+
+/** 工具活动条目的展示名：文件路径取 basename，其余（如笔记日期）原样 */
+function activityLabel(target: string): string {
+  const t = (target ?? '').trim();
+  if (!t) return '（未知位置）';
+  return /[/\\]/.test(t) ? path.basename(t) : t;
+}
+
+/**
+ * 会话聚合摘要段（第 7 期批次三 T11b · S-6）：多轮精炼（每轮一行）+ 工具活动统计
+ * （路径/主题词，无全文）+ 归档清单 + 「读过但未沉淀」显式提示。追加在既有「对话记录」之后，
+ * frontmatter 与既有正文格式不变（向后兼容）。
+ */
+function buildSnapshotDigestSections(session: SessionState): string[] {
+  const lines: string[] = [];
+  const history = session.history ?? [];
+  // 多轮精炼：每轮一行
+  lines.push('## 会话摘要', '');
+  if (history.length === 0) {
+    lines.push('（本会话暂无对话轮次）', '');
+  } else {
+    for (let i = 0; i < history.length; i += 2) {
+      const u = history[i];
+      const a = history[i + 1];
+      const uText = u && u.role === 'user' ? digestClip(u.content) : '';
+      const aText = a && a.role === 'assistant' ? digestClip(a.content) : '';
+      lines.push(`- 第 ${Math.floor(i / 2) + 1} 轮：用户「${uText}」${aText ? `｜ThatPerson「${aText}」` : ''}`);
+    }
+    lines.push('');
+  }
+  // 工具活动统计（只记路径/主题词，不携带文件全文）
+  const acts = session.toolActivity ?? [];
+  if (acts.length > 0) {
+    lines.push('## 工具活动', '', '本会话工具活动：');
+    for (const act of acts) {
+      const verb = READ_CLASS_TOOLS.has(act.tool) ? '读过' : '改过';
+      lines.push(`- ${verb} ${activityLabel(act.target)}（${act.sedimented ? '已沉淀' : '未沉淀'}）`);
+    }
+    const unSedimented = acts
+      .filter((act) => READ_CLASS_TOOLS.has(act.tool) && !act.sedimented)
+      .map((act) => activityLabel(act.target));
+    if (unSedimented.length > 0) {
+      lines.push('', `以下文件读过但未沉淀：${unSedimented.join('、')}（可让我整理提案）`);
+    }
+    lines.push('');
+  }
+  // 归档清单（本会话已归档条目，最多展示 20 条）
+  const archived = session.archivedInsights ?? [];
+  if (archived.length > 0) {
+    lines.push('## 归档清单', '');
+    for (const item of archived.slice(-20)) lines.push(`- ${item}`);
+    lines.push('');
+  }
+  return lines;
 }
 
 /** /save：把当前会话序列化为快照写入 history/sessions/（frontmatter + 既有正文格式，不覆盖同名文件，S-02/KS-42） */
@@ -278,6 +399,8 @@ export function saveSessionSnapshot(session: SessionState, historyDir: string): 
       `**${m.role === 'user' ? '用户' : 'ThatPerson'}**：${m.content}`,
       '',
     ]),
+    // T11b 会话聚合摘要：多轮精炼 + 工具活动统计（路径/主题词无全文）+ 归档清单 + 读过但未沉淀提示
+    ...buildSnapshotDigestSections(session),
   ].join('\n');
   const content = `${frontmatter}${body}`;
 
@@ -433,6 +556,8 @@ async function processInput(
     const skillMatch = matchSkill(`/${cmd.slice(1)}`, ctx.projectSkillsDirs);
     if (skillMatch && skillMatch.via === 'slash') {
       console.log(`已加载技能「${skillMatch.skill.name}」`);
+      // 会话事件协议（KS-7.21）：技能命中 → skill_start
+      emitEvent({ type: 'skill_start', name: skillMatch.skill.name });
       await runLlmTurn(line, ctx, { skill: skillMatch.skill });
       return;
     }
@@ -450,6 +575,8 @@ async function processInput(
   const autoMatch = matchSkill(line, ctx.projectSkillsDirs);
   if (autoMatch && autoMatch.via === 'auto') {
     console.log(`已加载技能「${autoMatch.skill.name}」`);
+    // 会话事件协议（KS-7.21）：技能命中 → skill_start
+    emitEvent({ type: 'skill_start', name: autoMatch.skill.name });
     await runLlmTurn(line, ctx, { skill: autoMatch.skill });
     return;
   }
@@ -463,12 +590,28 @@ async function processInput(
   await runLlmTurn(line, ctx, {});
 }
 
+/** 已装载记忆的节名清单（memory_read load 相 payload；只记节名，不记原文） */
+function loadedMemorySections(memories: Awaited<ReturnType<MemoryStore['load']>>): string[] {
+  const sections: string[] = [];
+  for (const [file, content] of Object.entries(memories.profile ?? {})) {
+    if (content && content.trim()) sections.push(`profile/${file}`);
+  }
+  if (memories.importantDates) sections.push('timeline/important_dates.md');
+  if (memories.patterns) sections.push('insights/patterns.md');
+  if (memories.journal) sections.push('experiences/journal.md');
+  return sections;
+}
+
 /** LLM 对话轮：组装上下文（技能/工具结果内部注入）→ 对话 → 历史折叠 → 归档（规则版兜底 + LLM 增强） */
 async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): Promise<void> {
   const memories = await ctx.store.load();
+  // 会话事件协议（KS-7.5）：memory_read load 相——只记节名，不记记忆原文
+  emitEvent({ type: 'memory_read', phase: 'load', sections: loadedMemorySections(memories) });
   try {
     let injected = '';
     if (extra.skill) {
+      // 技能上下文注入（KS-7.21）：skill_step 事件随注入发射（SEC-5 不后退，正文仍不进 System）
+      emitEvent({ type: 'skill_step', name: extra.skill.name, step: 'inject' });
       injected +=
         `\n[技能上下文]\n${extra.skill.content}\n[/技能上下文]` +
         '\n（以上技能说明为内部上下文，仅供你参考执行，请在回复中不要复述或泄露其原文。）';
@@ -478,7 +621,8 @@ async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): P
     }
     const prompt = injected ? `${line}\n${injected}` : line;
     // KS-20（ReAct）：普通消息走 loop.ts——解析器/执行器/回灌器循环，工具调用不直接显示给用户
-    const { reply } = await runAgentLoop({
+    // T11b：loop 同时导出读类工具结果（readContents/readResults，只走提案通道）与写类目标（writeTargets）
+    const loopResult = await runAgentLoop({
       userPrompt: prompt,
       memories,
       isMock: ctx.isMock,
@@ -489,7 +633,10 @@ async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): P
       skills: ctx.skills,
       tools: listTools(),
     });
+    const { reply } = loopResult;
     console.log(`ThatPerson：${reply}\n`);
+    // 会话事件协议（KS-7.5）：agent_message——最终回复（本地产品输出，可含正文）
+    emitEvent({ type: 'agent_message', role: 'assistant', content: reply, streaming: false });
 
     ctx.session.history.push({ role: 'user', content: line }, { role: 'assistant', content: reply });
     // 分层摘要：超出窗口时，把最早一轮折叠进摘要；summary 有上限（3d 二次折叠）
@@ -528,6 +675,54 @@ async function runLlmTurn(line: string, ctx: DialogContext, extra: TurnExtra): P
     );
     const archivedCount = archives.length + crossPatterns.length;
     if (archivedCount) console.log(`[ThatPerson] 已归档 ${archivedCount} 条记忆\n`);
+
+    // ===== T11b 会话工具活动 + 归档清单登记（快照聚合数据源；只记 tool/target/ok，无全文） =====
+    const activity = ctx.session.toolActivity ?? (ctx.session.toolActivity = []);
+    for (const r of loopResult.readResults ?? []) {
+      activity.push({ tool: r.tool, target: r.path, ok: true, sedimented: false });
+    }
+    for (const w of loopResult.writeTargets ?? []) {
+      activity.push({ tool: w.tool, target: w.target, ok: true, sedimented: false });
+    }
+    const archivedInsights = ctx.session.archivedInsights ?? (ctx.session.archivedInsights = []);
+    for (const entry of [...archives, ...crossPatterns]) {
+      archivedInsights.push(`${entry.type} | ${entry.insight}`);
+    }
+    if (archivedInsights.length > 20) archivedInsights.splice(0, archivedInsights.length - 20);
+
+    // ===== T11b 提议式沉淀（读类工具结果 → 提案卡 → 确认四级 → applyProposals；工具结果绝不直接归档） =====
+    const readResults = loopResult.readResults ?? [];
+    if (readResults.length > 0 || (loopResult.readContents ?? []).length > 0) {
+      const proposals: SedimentProposal[] = await proposeFromTurn({
+        toolResults: readResults.map((r) => ({ tool: r.tool, path: r.path, content: r.content })),
+        assistantText: reply,
+        userText: line,
+      });
+      // 走既有 extractArchives 归档者不重复提案（S-5 口径）：dialog 提案与本轮已归档条目按 type+提炼去重
+      const archivedKeys = new Set([...archives, ...crossPatterns].map((e) => `${e.type}|${e.insight}`));
+      const fresh = proposals.filter(
+        (p) => p.source !== 'dialog' || !archivedKeys.has(`${p.type ?? '偏好'}|${p.insight}`),
+      );
+      if (fresh.length > 0) {
+        // 确认四级（sediment 内部）：桩 → isMock 未确认（--mock 离线语义：不落盘）→ TTY 弹卡 → 非交互未确认
+        const applied = await confirmAndApply(fresh, ctx.store, {
+          isMock: ctx.isMock,
+          isTTY: Boolean(process.stdin.isTTY),
+        });
+        if (applied.confirmed) {
+          // 已沉淀标记：file 提案按 evidence.path 回写对应工具活动（「读过但未沉淀」提示随之消除）
+          const settled = new Set(
+            applied.accepted.filter((p) => p.evidence).map((p) => path.resolve(p.evidence!.path)),
+          );
+          for (const act of activity) {
+            if (!act.sedimented && act.target && settled.has(path.resolve(act.target))) {
+              act.sedimented = true;
+            }
+          }
+          console.log(`[ThatPerson] 已沉淀 ${applied.accepted.length} 条画像提案\n`);
+        }
+      }
+    }
   } catch (err) {
     console.error(`[ThatPerson] 出错：${err instanceof Error ? err.message : String(err)}\n`);
   }
@@ -567,6 +762,8 @@ function createInternalCommands(
       try {
         const file = saveSessionSnapshot(ctx.session, resolveHistoryDir());
         logger.success(`已保存会话快照：${file}`);
+        // 会话事件协议（KS-7.5）：session_meta save（只记元数据）
+        emitEvent({ type: 'session_meta', action: 'save' });
       } catch (err) {
         logger.error(`保存会话快照失败：${err instanceof Error ? err.message : String(err)}`);
       }
@@ -590,6 +787,7 @@ function createInternalCommands(
         ctx.session.summary = recovered.summary;
         ctx.session.recentUserTexts.length = 0;
         logger.success(`已恢复会话 ${id}（${Math.floor(recovered.history.length / 2)} 轮，含摘要）`);
+        emitEvent({ type: 'session_meta', action: 'load', id });
       } catch (err) {
         logger.error(`恢复会话失败：${err instanceof Error ? err.message : String(err)}`);
       }
@@ -609,6 +807,7 @@ function createInternalCommands(
         const id = metas[0].id; // id 缺省 → 最近一个快照（KS-44）
         titleSnapshot(id, title, resolveHistoryDir());
         logger.success(`已更新会话「${id}」标题：${title}`);
+        emitEvent({ type: 'session_meta', action: 'title', id, title });
       } catch (err) {
         logger.error(`修改标题失败：${err instanceof Error ? err.message : String(err)}`);
       }
@@ -860,6 +1059,71 @@ export async function runGlobalCommand(
       console.log('已重置配置（仅保留 apiKey 与 model）。对话内 /reset 仅清会话，语义不同。');
       return 0;
     }
+    case 'web': {
+      // --port <n> / --no-open 手工解析（parseArgs 已透传进 args；对齐 export --dir 的手工解析风格）
+      let port: number | undefined;
+      let open = true;
+      for (let i = 0; i < args.length; i += 1) {
+        const a = args[i];
+        if (a === '--no-open') {
+          open = false;
+        } else if (a === '--port') {
+          const value = args[i + 1];
+          const n = Number.parseInt(value ?? '', 10);
+          if (!value || !Number.isFinite(n) || n <= 0 || n > 65535) {
+            logger.warn('用法：thatperson web [--port <1-65535>] [--no-open]');
+            return 1;
+          }
+          port = n;
+          i += 1;
+        } else if (a.startsWith('--port=')) {
+          const n = Number.parseInt(a.slice('--port='.length), 10);
+          if (!Number.isFinite(n) || n <= 0 || n > 65535) {
+            logger.warn('用法：thatperson web [--port <1-65535>] [--no-open]');
+            return 1;
+          }
+          port = n;
+        } else {
+          logger.warn(`未知参数：${a}（用法：thatperson web [--port <n>] [--no-open]）`);
+          return 1;
+        }
+      }
+      // T7：web 首启幂等生成 PARA 仓库（仅 created 时打印，避免重复刷屏）
+      const vaultInfo = ensureParaVault();
+      if (vaultInfo.created) console.log(`[ThatPerson] 已初始化 PARA 仓库：${vaultInfo.root}`);
+      // T6：起本地服务（只绑 127.0.0.1；交互 TTY 且未 --no-open 才自动开浏览器；isMock 透传 --mock 语义）
+      let handle;
+      try {
+        handle = await startWebServer({
+          open: open && Boolean(process.stdin.isTTY),
+          port,
+          isMock: opts.isMock,
+        });
+      } catch (err) {
+        logger.error(`web 服务启动失败：${err instanceof Error ? err.message : String(err)}`);
+        return 1;
+      }
+      console.log(`[ThatPerson] web 服务已启动：http://127.0.0.1:${handle.port}（Ctrl+C 退出）`);
+      console.log('[ThatPerson] 记忆仓库：可在页面浏览 PARA 目录、编辑文件并与 ThatPerson 对话。');
+      // 保持进程存活直到 Ctrl+C（服务句柄由 handle 引用持有；SIGINT 默认终止进程）
+      await new Promise<void>(() => {});
+      return 0;
+    }
+    case 'open': {
+      const target = (args[0] ?? '').trim();
+      if (!target) {
+        logger.warn('用法：thatperson open <绝对路径>');
+        return 1;
+      }
+      // T8：与 allow-dir 指令完全同一条授权代码路径（绝对路径/存在/目录/realpath 校验 + config 持久化），仅文案不同
+      const result = allowDir(target);
+      if (!result.ok) {
+        logger.error(result.error);
+        return 1;
+      }
+      logger.success(`已作为仓库打开：${path.resolve(target)}（运行 thatperson web 查看）`);
+      return 0;
+    }
     case 'allow-dir': {
       const target = (args[0] ?? '').trim();
       if (!target) {
@@ -1039,18 +1303,139 @@ export async function runGlobalCommand(
 }
 // ===== 入口（S-01）=====
 
+/** 默认项目技能目录 */
 function defaultProjectSkillsDirs(): string[] {
   // KS-12：移除 .claude/skills 概念；出厂技能库（包内 skills/）由 skill.ts 级联兜底
   return [path.resolve(__dirname, '..', '..', 'skills')];
 }
 
+// ===== 进程韧性（第 7 期批次三 T11b · S-9 / KS-7.27）：兜底钩子，REPL 永不裸退 =====
+
+/**
+ * 进程级兜底钩子：unhandledRejection / uncaughtException → 打印卡点诊断
+ * （原因/上下文规模/输「继续」重试）且**不退出**（REPL 存活）。
+ * S-9 测试钩子：THATPERSON_FAULT_INJECT=unhandled-rejection 时注入一次未处理拒绝验证兜底。
+ */
+function installProcessHooks(): void {
+  const report = (label: string, err: unknown): void => {
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    // 只打 stderr 诊断，不退出：会话状态与记忆已保留，用户输「继续」即可重试
+    console.error(
+      `[ThatPerson] 卡点诊断：捕获${label}（${detail}）。` +
+        '常见原因：网络超时、上下文规模过大或工具执行异常；当前会话与记忆已保留，直接输入「继续」即可重试，程序不会退出。',
+    );
+  };
+  process.on('unhandledRejection', (reason) => report('未处理的 Promise 拒绝', reason));
+  process.on('uncaughtException', (err) => report('未捕获异常', err));
+}
+
+/** S-9 故障注入钩子：仅当显式设置 THATPERSON_FAULT_INJECT=unhandled-rejection 时触发一次 */
+function maybeInjectFault(): void {
+  if (process.env.THATPERSON_FAULT_INJECT === 'unhandled-rejection') {
+    // 兜底钩子应接住并输出卡点诊断，进程继续（不裸退）
+    Promise.reject(new Error('（THATPERSON_FAULT_INJECT）模拟未处理的 Promise 拒绝'));
+  }
+}
+
+// ===== T11 生产态蒸馏装配（唯一白名单端点纯文本补全；--mock/无 Key 不装配 → 直截断） =====
+
+/**
+ * 生产蒸馏实现：对超预算长命中发一次 chat 同端点纯文本补全（system 压缩指令 + user 原文，
+ * 无 tools、不经 runAgentLoop）；AbortSignal.timeout(chatTimeoutMs)；失败抛错 →
+ * retrieval.assembleInjection catch 后回退直截断（等价「失败返回 null」语义，DistillImpl
+ * 返回类型不含 null，不可回改 retrieval.ts）。
+ * 台账 kind:'distill' 由 retrieval.assembleInjection 统一经 recordTokenUsage 记账，此处不重复计数。
+ */
+async function productionDistillImpl(
+  text: string,
+  _ctx: { budgetChars: number },
+): Promise<{ summary: string; promptTokens: number; completionTokens: number }> {
+  const apiKey = resolveApiKey();
+  if (!apiKey) throw new Error('无 API Key，蒸馏回退直截断');
+  const system = '压缩以下记忆片段为要点，≤120 字，保留人名/日期/偏好，不要评论';
+  const body = JSON.stringify({
+    model: loadConfig().model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: text },
+    ],
+    stream: false,
+  });
+  const res = await fetch(`${BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body,
+    signal: AbortSignal.timeout(chatTimeoutMs(body.length)),
+  });
+  if (!res.ok) throw new Error(`蒸馏请求失败（HTTP ${res.status}），回退直截断`);
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const summary = (data.choices?.[0]?.message?.content ?? '').trim();
+  if (!summary) throw new Error('蒸馏返回为空，回退直截断');
+  return {
+    summary,
+    promptTokens: data.usage?.prompt_tokens ?? estimateTokens(text),
+    completionTokens: data.usage?.completion_tokens ?? estimateTokens(summary),
+  };
+}
+
+/** 生产态蒸馏装配（main 内调用）：非 mock 且 Key 存在时接生产实现；测试路径（--mock/无 Key）不装配 */
+function wireProductionDistill(isMock: boolean): void {
+  if (!isMock && resolveApiKey()) {
+    __setDistillImpl(productionDistillImpl);
+  }
+}
+
+/**
+ * 接线事件 sink（KS-7.4 / 会话事件协议 v1.0）：
+ * - `--events <file>`：追加写 NDJSON 文件（父目录自动创建；逐条同步落盘，进程退出前已刷新）；
+ * - `--events -`：写 stderr；
+ * - 缺省：零 sink，CLI 输出与现状逐字节等价（KS-7.6）；sink 内失败静默不影响主流程。
+ */
+function wireEventSink(sink: string | null): void {
+  if (!sink) return;
+  if (sink === '-') {
+    subscribeEventSink((event) => {
+      try {
+        process.stderr.write(`${JSON.stringify(event)}\n`);
+      } catch {
+        // 事件 sink 失败静默（KS-7.3）
+      }
+    });
+    return;
+  }
+  const file = path.resolve(sink);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  } catch {
+    // 目录创建失败时仍尝试追加写（失败静默）
+  }
+  subscribeEventSink((event) => {
+    try {
+      fs.appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8');
+    } catch {
+      // 事件 sink 失败静默（KS-7.3）
+    }
+  });
+}
+
 async function main(): Promise<void> {
+  // 进程韧性（S-9 / KS-7.27）：兜底钩子最先安装——unhandledRejection/uncaughtException 打卡点诊断不裸退
+  installProcessHooks();
+  maybeInjectFault();
   loadEnv();
   // KS-7（D9）：目录生成时机上移——任何一次调用（含 --version/--help）都保证 ~/.thatperson/ 存在
   ensureConfigDir();
   // KS-17：工具注册表初始化（danger 工具默认不注册）
   registerBuiltins();
   const args = parseArgs(process.argv);
+  // 会话事件协议（KS-7.4）：--events sink 接线（在任何发射点之前）
+  wireEventSink(args.eventsSink);
 
   // Bug 1 修复：--version / -V 输出版本后退出，不再进入对话（S-01）
   if (args.showVersion) {
@@ -1068,11 +1453,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // T7：PARA 仓库首启生成（幂等静默；置于 --version/--help 退出路径之后，--mock 也建）
+  const vaultInfo = ensureParaVault();
+  if (vaultInfo.created) console.log(`[ThatPerson] 已初始化 PARA 仓库：${vaultInfo.root}`);
+  else console.log(`[ThatPerson] 记忆仓库：${vaultInfo.root}`);
+
   const config = loadConfig();
   const store = createMemoryStore(memoryRoot());
   store.ensureStructure();
   const present = loadPresent();
   const projectSkillsDirs = defaultProjectSkillsDirs();
+  // T11 生产态蒸馏装配：非 mock 且 Key 存在时接生产实现（测试路径不装配 → 直截断兜底）
+  wireProductionDistill(args.isMock);
 
   // 全局子命令（S-03 中 status/update/help 由 CLI 内核提供）
   if (args.command) {

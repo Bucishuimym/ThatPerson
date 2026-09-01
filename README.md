@@ -7,7 +7,7 @@
 ![npm downloads](https://img.shields.io/npm/dm/@nineteenfolk/thatperson)
 ![Node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)
 
-个人 AI 管家：对话式 CLI，带长期记忆归档、技能系统与能力自省人格（Present）。
+个人 AI 管家：对话式 CLI，带长期记忆归档（记忆检索走 BM25 式统一打分 + 可重建倒排索引）、技能系统与能力自省人格（Present）。
 
 ## 安装
 
@@ -32,6 +32,8 @@ thatperson memory search <关键词>
 thatperson config get model
 thatperson export           # 导出记忆包（history/present/skills + manifest 校验和，不含 API Key）
 thatperson import <导出目录> # 导入记忆包（校验后合并，冲突先备份不覆盖）
+thatperson web             # 本地 web 工作台（四面板：文件树/编辑器/对话/活动轨道；只绑 127.0.0.1）
+thatperson open <绝对路径>  # 授权目录为仓库（web 文件树可浏览；复用 allow-dir 授权）
 ```
 
 对话内内部指令：`/help` `/history` `/clear` `/reset` `/save` `/list` `/load <id>` `/title <新标题>` `/exit` `/update`。
