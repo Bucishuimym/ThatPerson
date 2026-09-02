@@ -12,6 +12,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import type { ArchiveEntry, LoadedMemories, MemorySection } from './memory/types';
 import { buildPresentBlock } from './present';
 import { DEFAULT_MODEL, loadConfig, resolveApiKey, thatPersonHome } from './config';
@@ -482,6 +483,11 @@ export function retrieveRelevant(
   const keywords = extractKeywords(searchText);
   if (keywords.length === 0) return '';
 
+  // v1.4.1 修复（实测反馈 P1）：同轮 memo——loop 多轮工具循环以同一 prompt 重注入记忆时，
+  // 直接复用上轮装配结果，不再重复打分、不重复打印「检索命中」日志（示例二曾连打 7 次）。
+  const cacheKey = `${searchText}\u0000${corpusFingerprint(memories)}`;
+  if (cacheKey === lastRetrieveKey) return lastRetrieveResult;
+
   // T11 改接：统一打分检索 + 预算装配（内存语料直评；蒸馏装配入口为 retrieval.assembleInjection）
   const hits = searchScored(searchText, '', { topK: RETRIEVE_TOP_K, corpus });
   const assembled = assembleHitLines(hits, RETRIEVE_LAYER_CHAR_LIMIT);
@@ -491,8 +497,30 @@ export function retrieveRelevant(
     console.log(`[ThatPerson] 检索命中 ${hits.length} 条（关键词 ${keywords.length} 个）`);
     emitEvent({ type: 'memory_read', phase: 'retrieve', hits: hits.length, keywords: keywords.length });
   }
+  lastRetrieveKey = cacheKey;
+  lastRetrieveResult = result;
   return result;
 }
+
+/**
+ * v1.4.1：同轮 memo 的记忆语料指纹——对实际内容做 sha256（内容变则指纹变，跨轮自然失效）。
+ * 早期按「文件名+长度」计指纹，等长异文版本会误命中（FZ-3 回归：sYsTeM pRoMpT 与
+ * SYSTEM PROMPT 长度相同，缓存错配上一变体的装配结果）。
+ */
+function corpusFingerprint(memories: LoadedMemories): string {
+  const hash = createHash('sha256');
+  for (const [file, content] of Object.entries(memories.profile)) {
+    hash.update(`${file}\u0000${content ?? ''}\u0001`);
+  }
+  hash.update(`d\u0000${memories.importantDates ?? ''}\u0001`);
+  hash.update(`p\u0000${memories.patterns ?? ''}\u0001`);
+  hash.update(`j\u0000${memories.journal ?? ''}\u0001`);
+  hash.update(`s\u0000${(memories.recentSessions ?? []).join('\u0002')}`);
+  return hash.digest('hex');
+}
+
+let lastRetrieveKey = '';
+let lastRetrieveResult = '';
 
 /**
  * 生成技能摘要：技能名 + 一句描述 + 触发词（一行一条，人话摘要）。

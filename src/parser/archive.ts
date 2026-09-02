@@ -500,7 +500,11 @@ const IDENTITY_RULES: IdentityRule[] = [
   { re: /我在([^，。！！?;；\n]{1,12})/g, describe: (m) => '用户所在地：' + m[1] + '。' },
 ];
 
-/** 从用户文本提取身份条目 */
+/**
+ * 从用户文本提取身份条目。
+ * v1.4.1 修复（实测反馈 P1）：身份只收陈述句——捕获段含 wh-词（「我是谁」→「谁」）
+ * 或所在句子以问号结尾时跳过，不再产出「用户身份：谁」类垃圾条目。
+ */
 function extractIdentities(userText: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
   for (const rule of IDENTITY_RULES) {
@@ -508,6 +512,13 @@ function extractIdentities(userText: string): ArchiveEntry[] {
     let m: RegExpExecArray | null;
     while ((m = rule.re.exec(userText)) !== null) {
       const pos = m.index;
+      const captured = m[1] || '';
+      const [sentStart, sentEnd] = sentenceBounds(userText, pos);
+      const endsWithQuestionMark = /[？?]/.test(userText[sentEnd] ?? '');
+      if (!captured || QUESTION_MARKS.test(captured) || endsWithQuestionMark) {
+        rule.re.lastIndex = m.index + Math.max(m[0].length, 1);
+        continue;
+      }
       const dialog = dialogSnippet(userText, pos, 20);
       entries.push({
         type: '身份',
@@ -572,15 +583,19 @@ export interface SourceTaggedArchiveEntry extends ArchiveEntry {
   source?: 'dialog' | 'file';
 }
 
-/** 单文本归档管线（原 extractArchives 主体）：偏好/经历/日期/身份 + 条内去重 */
-function extractFromText(text: string): ArchiveEntry[] {
+/**
+ * 单文本归档管线（原 extractArchives 主体）：偏好/经历/日期[/身份] + 条内去重。
+ * includeIdentity=false 时跳过身份提取（v1.4.1：assistantText 的 AI 自我介绍不得
+ * 成为用户身份/所在地）。
+ */
+function extractFromText(text: string, includeIdentity: boolean): ArchiveEntry[] {
   const prefs = extractPrefs(text);
   detectConflicts(prefs);
   const entries: ArchiveEntry[] = [];
   for (const hit of prefs) entries.push(hit.entry);
   entries.push(...extractExperiences(text));
   entries.push(...extractDates(text));
-  entries.push(...extractIdentities(text));
+  if (includeIdentity) entries.push(...extractIdentities(text));
   return dedupe(entries);
 }
 
@@ -596,18 +611,24 @@ function similarInsight(a: ArchiveEntry, b: ArchiveEntry): boolean {
 /**
  * 从本轮对话提取归档条目（离线规则版，不调用任何 API）。
  * 第 7 期批次三 T11b · S-5：assistantText 纳入解析（修复死参）——对回复跑同一套
- * 偏好/身份/经历/日期规则，产出条目标注 source:'dialog'，并与 userText 条目
- * 按（type+提炼信息相似）去重合并；回复中的问句（「那我们改天去吃火锅吧」类）不归档
- * （既有疑问语气词/否定前置守卫同样作用于回复文本）。
+ * 偏好/经历/日期规则；身份规则只跑用户自述（v1.4.1：AI 的「我是 ThatPerson」
+ * 自介与路径类「我在 G:\…」不得成为用户身份/所在地）。产出条目标注 source:'dialog'，
+ * 并与 userText 条目按（type+提炼信息相似）去重合并；回复中的问句（「那我们改天
+ * 去吃火锅吧」类）不归档（既有疑问语气词/否定前置守卫同样作用于回复文本）。
  * 单条消息不产出「模式」；跨轮模式请调用 detectCrossTurnPatterns。
  */
 export function extractArchives(userText: string, assistantText: string): SourceTaggedArchiveEntry[] {
   const entries: SourceTaggedArchiveEntry[] = [];
-  // userText 在前（用户原话优先保留），assistantText 回复在后纳入解析
-  for (const text of [userText, assistantText]) {
+  // userText 在前（用户原话优先保留），assistantText 回复在后纳入解析；
+  // 身份只提取用户自述（isUser=true），回复中的 AI 自介/路径不进身份。
+  const parts: Array<[text: string, isUser: boolean]> = [
+    [userText, true],
+    [assistantText, false],
+  ];
+  for (const [text, isUser] of parts) {
     const t = (text || '').trim();
     if (!t) continue;
-    for (const entry of extractFromText(t)) {
+    for (const entry of extractFromText(t, isUser)) {
       // 跨文本去重：userText 与 assistantText 的重复陈述只留一条
       if (entries.some((prev) => similarInsight(prev, entry))) continue;
       entries.push({ ...entry, source: 'dialog' });

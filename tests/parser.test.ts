@@ -65,6 +65,22 @@ test('身份提取：我是/我叫/我今年/我在', () => {
   assert.ok(ids.some((a) => a.insight.includes('上海')));
 });
 
+test('身份提取：问句不产出身份（v1.4.1 P1 回归）', () => {
+  const archives = extractArchives('你是谁？我是谁？我在哪儿呢？', '');
+  assert.ok(!archives.some((a) => a.type === '身份'), '疑问句不得提取身份条目');
+});
+
+test('身份提取：assistant 回复中的 AI 自介/路径不进身份（v1.4.1 P1 回归）', () => {
+  const archives = extractArchives(
+    '你在哪里？',
+    '我在 G:\\XXFS\\Webstorm，我是 ThatPerson，我负责把仓库放在当前目录。',
+  );
+  assert.ok(
+    !archives.some((a) => a.type === '身份'),
+    '回复中的「我是 ThatPerson」「我在 G:\\…」不得成为用户身份/所在地',
+  );
+});
+
 test('模式提取：跨 ≥2 轮/天才判定，单条消息不产出（假模式消除）', () => {
   const single = extractArchives('我每天都要喝一杯咖啡，周末也常去咖啡馆坐坐，咖啡对我来说就是必需品。', '');
   assert.ok(!single.some((a) => a.type === '模式'), '单条消息内多次提及不判定为模式（BC-4 假模式消除）');

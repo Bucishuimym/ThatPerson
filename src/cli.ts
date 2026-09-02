@@ -32,7 +32,7 @@ import {
   SECTION_FILES,
 } from './memory/types';
 import { extractArchives, buildSessionSummary, detectCrossTurnPatterns, extractContentModeArchives } from './parser/archive';
-import { proposeFromTurn, confirmAndApply, type SedimentProposal } from './sediment';
+import { proposeFromTurn, confirmAndApply, setSedimentConfirmHandler, renderProposals, type SedimentProposal } from './sediment';
 import {
   allowDir,
   denyDir,
@@ -64,6 +64,7 @@ import { listSessions, loadSession, titleSnapshot, upsertSessionMeta } from './s
 import { exportMemory, importMemory } from './portable';
 import { listTools } from './tools/registry';
 import { registerBuiltins } from './tools/builtin';
+import { setWriteConfirmHandler, renderWritePlan } from './tools/write-gate';
 import { listSkills, matchSkill, type SkillInfo } from './skill';
 import { logger, showBanner, showStatusCard } from './utils/ui';
 import { checkForUpdates, readCurrentVersion, shouldSkipUpdateCheck } from './utils/update-check';
@@ -1534,6 +1535,26 @@ async function runDialog(ctx: DialogContext): Promise<void> {
     isMock: ctx.isMock,
   });
 
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+
+  // v1.4.1 修复（实测反馈 P0）：确认闸复用主循环 readline 提问，不再经 ui.ts 的 inquirer——
+  // inquirer 在 Windows 下结束后会接管/暂停 stdin，下一次 rl.question 直接 EOF，REPL 随即退出
+  // （症状：做了 Yes/No 选择后程序直接回到 shell）。沉淀与写闸两个确认点一并修复。
+  if (!ctx.isMock && stdin.isTTY) {
+    const confirmOnRl = async (question: string): Promise<boolean> => {
+      const ans = ((await rl.question(question)) ?? '').trim().toLowerCase();
+      return ans === 'y' || ans === 'yes' || ans === '是';
+    };
+    setSedimentConfirmHandler(async (proposals) => {
+      console.log(`\n${renderProposals(proposals)}\n`);
+      return confirmOnRl('是否沉淀以上画像提案？(y/N) ');
+    });
+    setWriteConfirmHandler(async (plan) => {
+      console.log(`\n${renderWritePlan(plan)}\n`);
+      return confirmOnRl('是否执行以上写操作计划？(y/N) ');
+    });
+  }
+
   // --input-file：从文件读入指令（UTF-8，剥离 BOM），单次对话后退出（S-01/Task 7）
   if (ctx.inputFile) {
     let content: string;
@@ -1541,17 +1562,19 @@ async function runDialog(ctx: DialogContext): Promise<void> {
       content = fs.readFileSync(ctx.inputFile, 'utf8').replace(/^\uFEFF/, '').trim();
     } catch (err) {
       logger.error(`无法读取输入文件：${err instanceof Error ? err.message : String(err)}`);
+      rl.close();
       process.exit(1);
     }
     if (!content) {
       logger.warn('输入文件为空，未产生对话');
+      rl.close();
       return;
     }
     await processInput(content, ctx, commands);
+    rl.close();
     return;
   }
 
-  const rl = readline.createInterface({ input: stdin, output: stdout });
   while (true) {
     let line: string;
     try {

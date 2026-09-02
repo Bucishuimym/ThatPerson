@@ -288,7 +288,7 @@ export function setSedimentConfirmHandler(handler: SedimentConfirmHandler | null
 }
 
 /** 提案卡清单渲染（TTY confirm 弹卡用；只含提炼/来源/证据定位，不携带文件全文） */
-function renderProposals(proposals: SedimentProposal[]): string {
+export function renderProposals(proposals: SedimentProposal[]): string {
   const lines = proposals.slice(0, 10).map((p, i) => {
     const ev = p.evidence
       ? `，证据 ${path.basename(p.evidence.path)}#L${p.evidence.lineStart}-L${p.evidence.lineEnd}`
